@@ -1,5 +1,5 @@
 #
-#    GnuPG/Tie/Encrypt.pm - Tied file handle interface to the encryption 
+#    GnuPG/Tie/Encrypt.pm - Tied file handle interface to the encryption
 #			    function of GnuPG.
 #
 #    This file is part of GnuPG.pm.
@@ -32,12 +32,12 @@ use vars qw( @ISA );
 
 BEGIN {
     @ISA = qw( GnuPG::Tie );
-};
+}
 
 sub run_gnupg {
     my $self = shift;
 
-    $self->{gnupg}->encrypt( @_ );
-};
+    $self->{gnupg}->encrypt(@_);
+}
 
 1;

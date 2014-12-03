@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+# PODNAME: gpgmailtunl
 #
 #    gpgmailtunl - Program that sends encrypted email.
 #

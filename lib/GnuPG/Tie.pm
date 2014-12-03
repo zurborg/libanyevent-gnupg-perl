@@ -37,53 +37,55 @@ sub TIEHANDLE {
     my $class = shift;
     $class = ref $class || $class;
 
-    my ($gpg_in, $gpg_out)  = ( gensym, gensym );
-    my ($tie_in,$tie_out)   = ( gensym, gensym );
+    my ( $gpg_in, $gpg_out ) = ( gensym, gensym );
+    my ( $tie_in, $tie_out ) = ( gensym, gensym );
     pipe $gpg_in, $tie_out
       or croak "error while creating pipe: $!";
     pipe $tie_in, $gpg_out
       or croak "error while creating pipe: $!";
 
     # Unbuffer writer pipes
-    for my $fd ( ($gpg_out, $tie_out) ) {
-	my $old = select $fd;
-	$| = 1;
-	select $old;
+    for my $fd ( ( $gpg_out, $tie_out ) ) {
+        my $old = select $fd;
+        $| = 1;
+        select $old;
     }
 
     # Keep pipes open after exec
     # Removed close on exec from all file descriptor
     for my $fd ( ( $gpg_in, $gpg_out, $tie_in, $tie_out ) ) {
-	fcntl( $fd, F_SETFD, 0 )
-	  or croak "error removing close on exec flag: $!\n" ;
+        fcntl( $fd, F_SETFD, 0 )
+          or croak "error removing close on exec flag: $!\n";
     }
 
     # Operate in non blocking mode
     for my $fd ( $tie_in, $tie_out ) {
-	my $flags = fcntl $fd, F_GETFL, 0
-	  or croak "error getting flags on pipe: $!\n";
-	fcntl $fd, F_SETFL, $flags | O_NONBLOCK
-	  or croak "error setting non-blocking IO on pipe: $!\n";
+        my $flags = fcntl $fd, F_GETFL, 0
+          or croak "error getting flags on pipe: $!\n";
+        fcntl $fd, F_SETFL, $flags | O_NONBLOCK
+          or croak "error setting non-blocking IO on pipe: $!\n";
     }
 
-    my $self = bless { reader	    => $tie_in,
-		       writer	    => $tie_out,
-		       done_writing => 0,
-		       buffer	    => "",
-		       len	    => 0,
-		       offset	    => 0,
-		       line_buffer  => "",
-		       eof	    => 0,
-		       gnupg	    => new GnuPG( @_ ),
-		     }, $class;
+    my $self = bless {
+        reader       => $tie_in,
+        writer       => $tie_out,
+        done_writing => 0,
+        buffer       => "",
+        len          => 0,
+        offset       => 0,
+        line_buffer  => "",
+        eof          => 0,
+        gnupg        => new GnuPG(@_),
+    }, $class;
 
     # Let subclass call the appropriate method and set
     # up the GnuPG object.
-    $self->run_gnupg( @_,
-		      input	=> $gpg_in,
-		      output	=> $gpg_out,
-		      tie_mode	=> 1,
-		    );
+    $self->run_gnupg(
+        @_,
+        input    => $gpg_in,
+        output   => $gpg_out,
+        tie_mode => 1,
+    );
     close $gpg_in;
     close $gpg_out;
 
@@ -96,32 +98,33 @@ sub WRITE {
     croak "attempt to read on a closed file handle\n"
       unless defined $self->{writer};
 
-    croak ( "can't write after having read" ) if $self->{done_writing};
+    croak("can't write after having read") if $self->{done_writing};
 
     my ( $r_in, $w_in ) = ( '', '' );
-    vec( $r_in, fileno $self->{reader}, 1) = 1;
-    vec( $w_in, fileno $self->{writer}, 1) = 1;
+    vec( $r_in, fileno $self->{reader}, 1 ) = 1;
+    vec( $w_in, fileno $self->{writer}, 1 ) = 1;
 
     my $left = $len;
-    while ( $left ) {
-	my ($r_out, $w_out) = ($r_in, $w_in);
-	my $nfound = select $r_out, $w_out, undef, undef;
-	croak "error in select: $!\n" unless defined $nfound;
+    while ($left) {
+        my ( $r_out, $w_out ) = ( $r_in, $w_in );
+        my $nfound = select $r_out, $w_out, undef, undef;
+        croak "error in select: $!\n" unless defined $nfound;
 
-	# Check if we can write
-	if ( vec $w_out, fileno $self->{writer}, 1 ) {
-	    my $n = syswrite $self->{writer}, $buf, $len, $offset;
-	    croak "error on write: $!\n" unless defined $n;
-	    $left -= $n;
-	    $offset += $n;
-	}
-	# Check if we can read
-	if ( vec $r_out, fileno $self->{reader}, 1 ) {
-	    my $n = sysread $self->{reader}, $self->{buffer}, 1024,
-	      $self->{len};
-	    croak "error on read: $!\n" unless defined $n;
-	    $self->{len} += $n;
-	}
+        # Check if we can write
+        if ( vec $w_out, fileno $self->{writer}, 1 ) {
+            my $n = syswrite $self->{writer}, $buf, $len, $offset;
+            croak "error on write: $!\n" unless defined $n;
+            $left -= $n;
+            $offset += $n;
+        }
+
+        # Check if we can read
+        if ( vec $r_out, fileno $self->{reader}, 1 ) {
+            my $n = sysread $self->{reader}, $self->{buffer}, 1024,
+              $self->{len};
+            croak "error on read: $!\n" unless defined $n;
+            $self->{len} += $n;
+        }
     }
 
     return $len;
@@ -133,25 +136,25 @@ sub done_writing() {
     # Once we start reading, no other writing can be place
     # on the pipe. So we close the writer file descriptor
     unless ( $self->{done_writing} ) {
-	$self->{done_writing} = 1;
-	close $self->{writer}
-	  or croak "error closing writer pipe: $\n";
+        $self->{done_writing} = 1;
+        close $self->{writer}
+          or croak "error closing writer pipe: $\n";
 
-	$self->postwrite_hook();
+        $self->postwrite_hook();
     }
 }
 
 sub READ {
-    my $self = shift;
+    my $self   = shift;
     my $bufref = \$_[0];
     my ( undef, $len, $offset ) = @_;
 
-    croak "attempt to read on a closed file handle\n" 
+    croak "attempt to read on a closed file handle\n"
       unless defined $self->{reader};
 
-    if ( $self->{eof}) {
-	$self->{eof} = 0;
-	return 0;
+    if ( $self->{eof} ) {
+        $self->{eof} = 0;
+        return 0;
     }
 
     # Start reading the input
@@ -159,21 +162,21 @@ sub READ {
 
     # Check if we have something in our buffer
     if ( $self->{len} - $self->{offset} ) {
-	my $left = $self->{len} - $self->{offset};
-	my $n = $left > $len ? $len : $left;
-	substr( $$bufref, $offset, $len) =
-	  substr $self->{buffer}, $self->{offset}, $n;
-	$self->{offset} += $n;
+        my $left = $self->{len} - $self->{offset};
+        my $n = $left > $len ? $len : $left;
+        substr( $$bufref, $offset, $len ) = substr $self->{buffer},
+          $self->{offset}, $n;
+        $self->{offset} += $n;
 
-	# Return only if we have read the requested length.
-	return $n if $n == $len;
+        # Return only if we have read the requested length.
+        return $n if $n == $len;
 
-	$offset += $n;
-	$len    -= $n;
+        $offset += $n;
+        $len -= $n;
     }
 
     # Wait for the reader fd to come ready
-    my ( $r_in ) = '';
+    my ($r_in) = '';
     vec( $r_in, fileno $self->{reader}, 1 ) = 1;
     my $nfound = select $r_in, undef, undef, undef;
     croak "error in select: $!\n" unless defined $nfound;
@@ -230,7 +233,7 @@ sub CLOSE {
     $self->{reader} = undef;
     $self->{writer} = undef;
 
-    ! $?;
+    !$?;
 }
 
 sub getlines {
@@ -239,7 +242,7 @@ sub getlines {
     my @lines = ();
     my $line;
     while ( defined( $line = $self->getline ) ) {
-	push @lines, $line;
+        push @lines, $line;
     }
 
     @lines;
@@ -249,62 +252,67 @@ sub getline {
     my $self = shift;
 
     if ( $self->{eof} ) {
-	# Clear EOF
-	$self->{eof} = 0;
-	return undef;
+
+        # Clear EOF
+        $self->{eof} = 0;
+        return undef;
     }
 
     # Handle slurp mode
     if ( not defined $/ ) {
-	my $buf	    = $self->{line_buffer};
-	my $offset  = length $buf;
-	while ( my $n = $self->READ( $buf, 4096, $offset ) ) {
-	    $offset += $n
-	}
-	return $buf;
+        my $buf    = $self->{line_buffer};
+        my $offset = length $buf;
+        while ( my $n = $self->READ( $buf, 4096, $offset ) ) {
+            $offset += $n;
+        }
+        return $buf;
     }
 
     # Handle explicit RS
     if ( $/ ne "" ) {
-	my $buf = $self->{line_buffer};
-	while ( not $self->{eof} ) {
+        my $buf = $self->{line_buffer};
+        while ( not $self->{eof} ) {
 
-	    if ( length $buf != 0 ) {
-		my $i;
-		if ( ( $i = index $buf, $/ ) != -1 ) {
-		    # Found end of line
-		    $self->{line_buffer} = substr $buf, $i + length $/;
+            if ( length $buf != 0 ) {
+                my $i;
+                if ( ( $i = index $buf, $/ ) != -1 ) {
 
-		    return substr $buf, 0, $i + length $/;
-		}
-	    }
+                    # Found end of line
+                    $self->{line_buffer} = substr $buf, $i + length $/;
 
-	    # Read more data in our buffer
-	    my $n = $self->READ( $buf, 4096, length $buf );
-	    if ( $n == 0 ) {
-		# Set EOF
-		$self->{eof} = 1;
-		return length $buf == 0 ? undef : $buf ;
-	    }
-	}
-    } else {
-	my $buf = $self->{line_buffer};
-	while ( not $self->{eof} ) {
+                    return substr $buf, 0, $i + length $/;
+                }
+            }
 
-	    if ( $buf =~ m/(\r\n\r\n+|\n\n+)/s ) {
-		my ($para, $rest) = split /\r\n\r\n+|\n\n+/, $buf, 2;
-		$self->{line_buffer} = $rest;
-		return $para . $1;
-	    }
+            # Read more data in our buffer
+            my $n = $self->READ( $buf, 4096, length $buf );
+            if ( $n == 0 ) {
 
-	    # Read more data in our buffer
-	    my $n = $self->READ( $buf, 4096, length $buf );
-	    if ( $n == 0 ) {
-		# Set EOF
-		$self->{eof} = 1;
-		return length $buf == 0 ? undef : $buf ;
-	    }
-	}
+                # Set EOF
+                $self->{eof} = 1;
+                return length $buf == 0 ? undef : $buf;
+            }
+        }
+    }
+    else {
+        my $buf = $self->{line_buffer};
+        while ( not $self->{eof} ) {
+
+            if ( $buf =~ m/(\r\n\r\n+|\n\n+)/s ) {
+                my ( $para, $rest ) = split /\r\n\r\n+|\n\n+/, $buf, 2;
+                $self->{line_buffer} = $rest;
+                return $para . $1;
+            }
+
+            # Read more data in our buffer
+            my $n = $self->READ( $buf, 4096, length $buf );
+            if ( $n == 0 ) {
+
+                # Set EOF
+                $self->{eof} = 1;
+                return length $buf == 0 ? undef : $buf;
+            }
+        }
     }
 }
 

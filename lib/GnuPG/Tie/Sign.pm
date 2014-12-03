@@ -32,10 +32,10 @@ use vars qw( @ISA );
 
 BEGIN {
     @ISA = qw( GnuPG::Tie );
-};
+}
 
 sub run_gnupg {
-    $self->{gnupg}->sign( @_ );
-};
+    $self->{gnupg}->sign(@_);
+}
 
 1;
