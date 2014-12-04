@@ -131,11 +131,13 @@ sub pipe_encrypt_test {
             output    => \*CAT,
             armor     => 1,
             plaintext => "test/file.txt",
-        )
-    } catch {
+          )
+    }
+    catch {
         diag $_;
         fail
-    } finally {
+    }
+    finally {
         close CAT
     }
 }
@@ -217,11 +219,13 @@ sub pipe_decrypt_test {
             output     => "test/file.txt.plain",
             ciphertext => \*CAT,
             passphrase => PASSWD,
-        )
-    } catch {
+          )
+    }
+    catch {
         diag $_;
         fail
-    } finally {
+    }
+    finally {
         close CAT
     }
 }
@@ -266,11 +270,13 @@ sub encrypt_from_fh_test {
             output    => "test/file-fh.txt.gpg",
             armor     => 1,
             plaintext => \*FH,
-        )
-    } catch {
+          )
+    }
+    catch {
         diag $_;
         fail
-    } finally {
+    }
+    finally {
         close FH
     }
 }
@@ -283,11 +289,13 @@ sub encrypt_to_fh_test {
             output    => \*FH,
             armor     => 1,
             plaintext => "test/file.txt",
-        )
-    } catch {
+          )
+    }
+    catch {
         diag $_;
         fail
-    } finally {
+    }
+    finally {
         close FH
     }
 }
