@@ -277,7 +277,7 @@ sub _run_gnupg {
         bin     => $gpg,
         args    => $cmdline,
         extras  => [ $status, $command ],
-        ttl     => 10,
+        ttl     => 300,
         errstr  => \$err,
         on_exit => sub {
             AE::log note => $err if $err;
