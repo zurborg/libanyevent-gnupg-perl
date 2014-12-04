@@ -2,9 +2,12 @@ Revision history for GnuPG
 
 {{$NEXT}}
  - merge ChangeLog with NEWS to Changes
- - remove gpgmailtunl
- - remove spec file
  - tidy up code (Perl::Tidy)
+ - remove spec file
+
+ [API CHANGES]
+ - remove gpgmailtunl
+ - use AnyEvent::Proc
 
 0.190 - 2014-12-03
  - change version format
