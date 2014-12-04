@@ -654,6 +654,41 @@ sub import_keys {
     return $count;
 }
 
+=method import_key($string)
+
+Import one single key into the GnuPG private or public keyring. The method croaks if it encounters an error.
+
+Example:
+
+    $gpg->import_keys($string);
+
+=cut
+
+sub import_key {
+    my ( $self, $keystr ) = @_;
+
+    $self->_command("import");
+    $self->_options( [] );
+
+    $self->{input} = \"$keystr";
+    $self->_args( [] );
+
+    $self->_run_gnupg;
+    $self->{gnupg_proc}->finish;
+
+    my ( $cmd, $arg );
+
+    ( $cmd, $arg ) = $self->_read_from_status;
+    $self->_abort_gnupg("protocol error expected IMPORTED got $cmd")
+      unless $cmd =~ /IMPORTED|IMPORT_OK/;
+
+    ( $cmd, $arg ) = $self->_read_from_status;
+    $self->_abort_gnupg("protocol error expected IMPORT_OK got $cmd")
+      unless $cmd =~ /IMPORT_OK|IMPORT_RES/;
+
+    $self->_end_gnupg;
+}
+
 =method export_keys(%params)
 
 Exports keys from the GnuPG keyrings. The method croaks if it encounters an error. Parameters:
