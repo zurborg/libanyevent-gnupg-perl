@@ -139,8 +139,7 @@ sub _cmdline {
     my $args = [ $self->{gnupg_path} ];
 
     # Default options
-    push @$args, "--no-tty" unless $self->{trace};
-    push @$args, "--no-greeting", "--yes";
+    push @$args, "--no-tty", "--no-greeting", "--yes";
 
     # Check for homedir and options file
     push @$args, "--homedir", $self->{homedir} if $self->{homedir};
@@ -324,8 +323,6 @@ sub _cpr_send {
         return;
     }
 
-    AE::log trace => "writing command: $value";
-
     $fd->writeln($value);
 
     ( $cmd, $arg ) = $self->_read_from_status;
@@ -450,10 +447,6 @@ Path to the options file for B<gpg>. If not specified, it will use the default o
 
 Path to the B<gpg> home directory. This is the directory that contains the default F<options> file, the public and private key rings as well as the trust database.
 
-=item * trace
-
-If this variable is set to true, B<gpg> debugging output will be sent to stderr.
-
 =back
 
 Example:
@@ -488,7 +481,6 @@ sub new {
         croak("Couldn't find gpg in PATH ($ENV{PATH})") unless $path;
         $self->{gnupg_path} = "$path/gpg";
     }
-    $self->{trace} = $args{trace} ? 1 : 0;
 
     bless $self, $class;
 }
@@ -682,7 +674,7 @@ If this argument is set to true, all keys (even those that aren't OpenPGP compli
 
 =item * output
 
-This argument specifies where the keys will be exported. Can be either a file name or a reference to a file handle. If not specified, the keys will be exported to stdout.
+This argument specifies where the keys will be exported. Can be either a file name or a reference to a file handle.
 
 =item * armor
 
@@ -736,11 +728,11 @@ This method is used to encrypt a message, either using assymetric or symmetric c
 
 =item * plaintext
 
-This argument specifies what to encrypt. It can be either a filename or a reference to a file handle. If left unspecified, STDIN will be encrypted.
+This argument specifies what to encrypt. It can be either a filename or a reference to a file handle.
 
 =item * output
 
-This optional argument specifies where the ciphertext will be output. It can be either a file name or a reference to a file handle. If left unspecified, the ciphertext will be sent to STDOUT.
+This optional argument specifies where the ciphertext will be output. It can be either a file name or a reference to a file handle.
 
 =item * armor
 
@@ -849,11 +841,11 @@ This method croaks on errors. Parameters:
 
 =item * plaintext
 
-This argument specifies what  to sign. It can be either a filename or a reference to a file handle. If left unspecified, the data read on STDIN will be signed.
+This argument specifies what  to sign. It can be either a filename or a reference to a file handle.
 
 =item * output
 
-This optional argument specifies where the signature will be output. It can be either a file name or a reference to a file handle. If left unspecified, the signature will be sent to STDOUT.
+This optional argument specifies where the signature will be output. It can be either a file name or a reference to a file handle.
 
 =item * armor
 
@@ -865,7 +857,7 @@ This parameter contains the secret that should be used to decrypt the private ke
 
 =item * local-user
 
-This parameter is used to specified the private key that will be used to make the signature . If left unspecified, the default user will be used.
+This parameter is used to specified the private key that will be used to make the signature. If left unspecified, the default user will be used.
 
 =item * detach-sign
 
@@ -944,7 +936,7 @@ This is a file name or a reference to an array of file names that contains the s
 
 =back
 
-When the signature is valid, here are the elements of the hash that is returned by the method :
+When the signature is valid, here are the elements of the hash that is returned by the method:
 
 =over 4
 
@@ -1021,11 +1013,11 @@ This method decrypts an encrypted message. It croaks, if there is an error while
 
 =item * ciphertext
 
-This optional parameter contains either the name of the file containing the ciphertext or a reference to a file handle containing the ciphertext. If not present, STDIN will be decrypted.
+This optional parameter contains either the name of the file containing the ciphertext or a reference to a file handle containing the ciphertext.
 
 =item * output
 
-This optional parameter determines where the plaintext will be stored. It can be either a file name or a reference to a file handle. If left unspecified, the plaintext will be sent to STDOUT.
+This optional parameter determines where the plaintext will be stored. It can be either a file name or a reference to a file handle.
 
 =item * symmetric
 
