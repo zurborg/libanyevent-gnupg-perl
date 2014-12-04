@@ -5,12 +5,12 @@
 
 use strict;
 use Test::More;
+use Try::Tiny;
 
 use constant USERID    => "GnuPG Test";
 use constant PASSWD    => "test";
 use constant UNTRUSTED => "Francis";
 
-use Symbol;
 use GnuPG;
 
 BEGIN {
@@ -68,10 +68,7 @@ sub multiple_recipients {
         plaintext => "test/file.txt",
     );
 
-    open my $fh, '<', "test/file.txt.gpg";
-
     die "'test/file.txt.gpg' is empty\n" unless -s 'test/file.txt.gpg';
-
 }
 
 sub gen_key_test {
@@ -127,15 +124,20 @@ sub encrypt_test {
 }
 
 sub pipe_encrypt_test {
-    open CAT, "| cat > test/pipe-file.txt.gpg"
-      or die "can't fork: $!\n";
-    $gpg->encrypt(
-        recipient => USERID,
-        output    => \*CAT,
-        armor     => 1,
-        plaintext => "test/file.txt",
-    );
-    close CAT;
+    open CAT, "| cat > test/pipe-file.txt.gpg" or die "can't fork: $!\n";
+    try {
+        $gpg->encrypt(
+            recipient => USERID,
+            output    => \*CAT,
+            armor     => 1,
+            plaintext => "test/file.txt",
+        )
+    } catch {
+        diag $_;
+        fail
+    } finally {
+        close CAT
+    }
 }
 
 sub encrypt_sign_test {
@@ -209,14 +211,19 @@ sub decrypt_test {
 }
 
 sub pipe_decrypt_test {
-    open CAT, "cat test/file.txt.gpg|"
-      or die "can't fork: $!\n";
-    $gpg->decrypt(
-        output     => "test/file.txt.plain",
-        ciphertext => \*CAT,
-        passphrase => PASSWD,
-    );
-    close CAT;
+    open CAT, "cat test/file.txt.gpg|" or die "can't fork: $!\n";
+    try {
+        $gpg->decrypt(
+            output     => "test/file.txt.plain",
+            ciphertext => \*CAT,
+            passphrase => PASSWD,
+        )
+    } catch {
+        diag $_;
+        fail
+    } finally {
+        close CAT
+    }
 }
 
 sub decrypt_sign_test {
@@ -252,27 +259,35 @@ sub verify_clearsign_test {
 }
 
 sub encrypt_from_fh_test {
-    open( FH, "test/file.txt" )
-      or die "error opening file: $!\n";
-    $gpg->encrypt(
-        recipient => UNTRUSTED,
-        output    => "test/file-fh.txt.gpg",
-        armor     => 1,
-        plaintext => \*FH,
-    );
-    close(FH)
-      or die "error closing file: $!\n";
+    open( FH, "test/file.txt" ) or die "error opening file: $!\n";
+    try {
+        $gpg->encrypt(
+            recipient => UNTRUSTED,
+            output    => "test/file-fh.txt.gpg",
+            armor     => 1,
+            plaintext => \*FH,
+        )
+    } catch {
+        diag $_;
+        fail
+    } finally {
+        close FH
+    }
 }
 
 sub encrypt_to_fh_test {
-    open( FH, ">test/file-fho.txt.gpg" )
-      or die "error opening file: $!\n";
-    $gpg->encrypt(
-        recipient => UNTRUSTED,
-        output    => \*FH,
-        armor     => 1,
-        plaintext => "test/file.txt",
-    );
-    close(FH)
-      or die "error closing file: $!\n";
+    open( FH, ">test/file-fho.txt.gpg" ) or die "error opening file: $!\n";
+    try {
+        $gpg->encrypt(
+            recipient => UNTRUSTED,
+            output    => \*FH,
+            armor     => 1,
+            plaintext => "test/file.txt",
+        )
+    } catch {
+        diag $_;
+        fail
+    } finally {
+        close FH
+    }
 }
