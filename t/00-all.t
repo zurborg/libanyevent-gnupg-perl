@@ -12,8 +12,6 @@ use constant UNTRUSTED => "Francis";
 
 use Symbol;
 use GnuPG;
-use GnuPG::Tie::Encrypt;
-use GnuPG::Tie::Decrypt;
 
 BEGIN {
     $| = 1;
@@ -42,9 +40,6 @@ my @tests = qw(
   verify_sign_test
   verify_detachsign_test
   verify_clearsign_test
-  tie_encrypt_test
-  tie_decrypt_test
-  tie_decrypt_para_mode_test
   multiple_recipients
 );
 
@@ -280,92 +275,4 @@ sub encrypt_to_fh_test {
     );
     close(FH)
       or die "error closing file: $!\n";
-}
-
-sub tie_encrypt_test {
-    open( PLAINTEXT, "test/file.txt" )
-      or die "error opening file: $!\n";
-    open( CIPHER_OUT, ">test/file-tie.txt.asc" )
-      or die "error writing encrypting file\n";
-    tie *CIPHER, 'GnuPG::Tie::Encrypt',
-      homedir   => "test",
-      recipient => 'GnuPG',
-      armor     => 1,
-      trace     => $ENV{TRACING};
-    while (<PLAINTEXT>) {
-        print CIPHER $_;
-    }
-    close PLAINTEXT;
-
-    while (<CIPHER>) {
-        print CIPHER_OUT $_;
-    }
-    close CIPHER;
-    untie *CIPHER;
-    close CIPHER_OUT;
-}
-
-sub tie_decrypt_test {
-    open( PLAINTEXT, "test/file.txt" )
-      or die "error opening plaintext file: $!\n";
-    my $plaintext_orig = "";
-    $plaintext_orig .= $_ while (<PLAINTEXT>);
-    close PLAINTEXT;
-
-    open( CIPHER, "test/file-tie.txt.asc" )
-      or die "error opening encrypted file\n";
-    tie *GNUPG, 'GnuPG::Tie::Decrypt',
-      homedir    => "test",
-      passphrase => PASSWD,
-      trace      => $ENV{TRACING};
-
-    while (<CIPHER>) {
-        print GNUPG $_;
-    }
-    my $plaintext = "";
-    while (<GNUPG>) {
-        $plaintext .= $_;
-    }
-    close GNUPG;
-    untie *GNUPG;
-    close CIPHER;
-
-    die "plaintext doesn't match\n" unless $plaintext_orig eq $plaintext;
-}
-
-sub tie_decrypt_para_mode_test {
-    my $plaintext = <<EOF;
-This is a paragraph.
-
-This is another paragraph
-which continue on another line.
-
-
-
-This is the final paragraph.
-EOF
-    tie *CIPHER, 'GnuPG::Tie::Encrypt',
-      homedir   => "test",
-      recipient => 'GnuPG',
-      armor     => 1,
-      trace     => $ENV{TRACING};
-
-    print CIPHER $plaintext;
-    local $/ = undef;
-    my $cipher = <CIPHER>;
-    close CIPHER;
-    untie *CIPHER;
-
-    local $/ = "";
-    tie *TEST, 'GnuPG::Tie::Decrypt', homedir => "test", passphrase => PASSWD;
-    print TEST $cipher;
-
-    my @para = <TEST>;
-    close TEST;
-    untie *TEST;
-
-    my $count = @para;
-    die "paragraph count should be 3: $count\n" unless $count == 3;
-    die "plaintext doesn't match input\n"
-      unless join( "", @para ) eq $plaintext;
 }

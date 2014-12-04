@@ -8,15 +8,16 @@ package GnuPG;
 # VERSION
 
 use Exporter 'import';
+use AnyEvent;
+use AnyEvent::Proc 0.102;
+use Email::Address;
 
 our @EXPORT = qw();
 
 our %EXPORT_TAGS = (
-    algo  => [qw( RSA_RSA DSA_ELGAMAL DSA RSA )],
+    algo  => [qw[ RSA_RSA DSA_ELGAMAL DSA RSA ]],
     trust => [
-        qw(    TRUST_UNDEFINED    TRUST_NEVER
-          TRUST_MARGINAL    TRUST_FULLY
-          TRUST_ULTIMATE )
+        qw[ TRUST_UNDEFINED TRUST_NEVER TRUST_MARGINAL TRUST_FULLY TRUST_ULTIMATE ]
     ],
 );
 
@@ -34,49 +35,44 @@ use constant TRUST_FULLY     => 2;
 use constant TRUST_ULTIMATE  => 3;
 
 use Carp;
-use POSIX qw();
-use Symbol;
-use Fcntl;
 
 sub parse_trust {
     for (shift) {
-        /ULTIMATE/ && do { return TRUST_ULTIMATE; };
-        /FULLY/    && do { return TRUST_FULLY; };
-        /MARGINAL/ && do { return TRUST_MARGINAL; };
-        /NEVER/    && do { return TRUST_NEVER; };
-
-        # Default
-        return TRUST_UNDEFINED;
+        if (defined) {
+            /ULTIMATE/ && do { return TRUST_ULTIMATE; };
+            /FULLY/    && do { return TRUST_FULLY; };
+            /MARGINAL/ && do { return TRUST_MARGINAL; };
+            /NEVER/    && do { return TRUST_NEVER; };
+        }
+        return TRUST_UNDEFINED;    # Default
     }
 }
 
-sub options($;$) {
+sub options {
     my $self = shift;
     $self->{cmd_options} = shift if ( $_[0] );
     $self->{cmd_options};
 }
 
-sub command($;$) {
+sub command {
     my $self = shift;
     $self->{command} = shift if ( $_[0] );
     $self->{command};
 }
 
-sub args($;$) {
+sub args {
     my $self = shift;
     $self->{args} = shift if ( $_[0] );
     $self->{args};
 }
 
-sub cmdline($) {
+sub cmdline {
     my $self = shift;
     my $args = [ $self->{gnupg_path} ];
 
     # Default options
     push @$args, "--no-tty" unless $self->{trace};
-    push @$args, "--no-greeting", "--yes", "--status-fd",
-      fileno $self->{status_fd},
-      "--command-fd", fileno $self->{command_fd};
+    push @$args, "--no-greeting", "--yes";
 
     # Check for homedir and options file
     push @$args, "--homedir", $self->{homedir} if $self->{homedir};
@@ -92,57 +88,7 @@ sub cmdline($) {
     return $args;
 }
 
-sub end_gnupg($) {
-    my $self = shift;
-
-    print STDERR "GnuPG: closing status fd "
-      . fileno( $self->{status_fd} ) . "\n"
-      if $self->{trace};
-
-    close $self->{status_fd}
-      or croak "error while closing pipe: $!\n";
-
-    print STDERR "GnuPG: closing command fd "
-      . fileno( $self->{command_fd} ) . "\n"
-      if $self->{trace};
-
-    close $self->{command_fd}
-      or croak "error while closing pipe: $!\n";
-
-    waitpid $self->{gnupg_pid}, 0
-      or croak "error while waiting for gpg: $!\n";
-
-    for (
-        qw(protocol gnupg_pid command options args status_fd command_fd
-        input output next_status )
-      )
-    {
-        delete $self->{$_};
-    }
-
-}
-
-sub abort_gnupg($$) {
-    my ( $self, $msg ) = @_;
-
-    # Signal our child that it is the end
-    if ( $self->{gnupg_pid} && kill 0 => $self->{gnupg_pid} ) {
-        kill INT => $self->{gnupg_pid};
-    }
-
-    $self->end_gnupg;
-
-    confess($msg);
-}
-
-# Used to push back status information
-sub next_status($$$) {
-    my ( $self, $cmd, $arg ) = @_;
-
-    $self->{next_status} = [ $cmd, $arg ];
-}
-
-sub read_from_status($) {
+sub read_from_status {
     my $self = shift;
 
     # Check if a status was pushed back
@@ -152,167 +98,173 @@ sub read_from_status($) {
         return @$status;
     }
 
-    print STDERR "GnuPG: reading from status fd "
-      . fileno( $self->{status_fd} ) . "\n"
-      if $self->{trace};
-
-    my $fd = $self->{status_fd};
-    local $/ = "\n";    # Just to be sure
-    my $line = <$fd>;
-    unless ($line) {
-        print STDERR "GnuPG: got from status fd: EOF" if $self->{trace};
-        return ();
+    unless ( $self->{status_fd} ) {
+        $self->abort_gnupg("status fd not there");
     }
 
-    print STDERR "GnuPG: got from status fd: $line" if $self->{trace};
+    AE::log debug => "reading from status fd";
+    my $line = $self->{status_fd}->readline;
+    unless ( defined $line ) {
+        $self->abort_gnupg("got nothing from status fd");
+    }
+
+    AE::log debug => "got from status fd: $line";
 
     my ( $cmd, $arg ) = $line =~ /\[GNUPG:\] (\w+) ?(.+)?$/;
-    $self->abort_gnupg(
-        "error communicating with gnupg: bad status line: $line\n")
+    $self->abort_gnupg("error communicating with gnupg: bad status line: $line")
       unless $cmd;
-    print STDERR "GnuPG: Parsed as " . $cmd . " - " . $arg . "\n"
-      if $self->{trace};
+    $arg ||= '';
+    AE::log debug => "parsed as: $cmd - $arg";
+
     return wantarray ? ( $cmd, $arg ) : $cmd;
 }
 
-sub run_gnupg($) {
+sub next_status {
+    my ( $self, $cmd, $arg ) = @_;
+
+    $self->{next_status} = [ $cmd, $arg ];
+}
+
+sub abort_gnupg {
+    my ( $self, $msg ) = @_;
+    AE::log error => $msg if $msg;
+    $self->{gnupg_proc}->fire_and_kill(10) if $self->{gnupg_proc};
+    AE::log debug => "fired and killed";
+    $self->end_gnupg;
+    AE::log debug => "gnupg aborted";
+    confess($msg);
+}
+
+sub end_gnupg {
     my $self = shift;
 
-    my $fd  = gensym;
-    my $wfd = gensym;
-
-    my $crfd = gensym;    # command read and write file descriptors
-    my $cwfd = gensym;
-
-    pipe $fd, $wfd
-      or croak("error creating status pipe: $!\n");
-    my $old = select $wfd;
-    $| = 1;               # Unbuffer
-    select $old;
-
-    pipe $crfd, $cwfd
-      or croak("error creating command pipe: $!\n");
-    $old = select $cwfd;
-    $|   = 1;              # Unbuffer
-    select $old;
-
-    # Keep pipe open after close
-    fcntl( $fd, F_SETFD, 0 )
-      or croak "error removing close on exec flag: $!\n";
-    fcntl( $wfd, F_SETFD, 0 )
-      or croak "error removing close on exec flag: $!\n";
-    fcntl( $crfd, F_SETFD, 0 )
-      or croak "error removing close on exec flag: $!\n";
-    fcntl( $cwfd, F_SETFD, 0 )
-      or croak "error removing close on exec flag: $!\n";
-
-    my $pid = fork;
-    croak("error forking: $!") unless defined $pid;
-    if ($pid) {
-
-        # Parent
-        close $wfd;
-
-        $self->{status_fd}  = $fd;
-        $self->{gnupg_pid}  = $pid;
-        $self->{command_fd} = $cwfd;
-
+    if ( ref $self->{input} eq 'GLOB' ) {
+        AE::log debug => "close input file";
+        close $self->{input};
     }
-    else {
-        # Child
-        $self->{status_fd}  = $wfd;
-        $self->{command_fd} = $crfd;
 
-        my $cmdline = $self->cmdline;
-        unless ( $self->{trace} ) {
-            open( STDERR, "> /dev/null" )
-              or die "can't redirect stderr to /dev/null: $!\n";
-        }
+    if ( $self->{command_fd} ) {
+        AE::log debug => "finish command fd";
+        $self->{command_fd}->finish;
+    }
 
-        # This is where we grab the data
-        if ( ref $self->{input} && defined fileno $self->{input} ) {
-            open( STDIN, "<&" . fileno $self->{input} )
-              or die "error setting up data input: $!\n";
-        }
-        elsif ( $self->{input} && -t STDIN ) {
-            open( STDIN, $self->{input} )
-              or die "error setting up data input: $!\n";
-        }
-        elsif ( $self->{input} ) {
-            push( @{$cmdline}, $self->{input} );
-        }    # Defaults to stdin
+    if ( $self->{status_fd} ) {
+        AE::log debug => "destroy status fd";
+        $self->{status_fd}->A->destroy;
+    }
 
-        # This is where the output goes
-        if ( ref $self->{output} && defined fileno $self->{output} ) {
-            open( STDOUT, ">&" . fileno $self->{output} )
-              or die "can't redirect stdout to proper output fd: $!\n";
-        }
-        elsif ( $self->{output} && -t STDOUT ) {
-            open( STDOUT, ">" . $self->{output} )
-              or die "can't open $self->{output} for output: $!\n";
-        }
-        elsif ( $self->{output} ) {
-            my $gpg = shift( @{$cmdline} );
-            unshift( @{$cmdline}, '--output', $self->{output} );
-            unshift( @{$cmdline}, $gpg );
-        }    # Defaults to stdout
+    if ( $self->{gnupg_proc} ) {
+        AE::log debug => "finish proc";
+        $self->{gnupg_proc}->finish;
+        AE::log debug => "waiting...";
+        my $exitcode = $self->{gnupg_proc}->wait;
+        AE::log debug => "exited with $exitcode";
+    }
 
-        # Close all open file descriptors except STDIN, STDOUT, STDERR
-        # and the status filedescriptor.
-        #
-        # This is needed for the tie interface which opens pipes which
-        # some ends must be closed in the child.
-        #
-        # Besides this is just plain good hygiene
-        my $max_fd = POSIX::sysconf(&POSIX::_SC_OPEN_MAX) || 256;
-        foreach my $f ( 3 .. $max_fd ) {
-            next if $f == fileno $self->{status_fd};
-            next if $f == fileno $self->{command_fd};
-            POSIX::close($f);
-        }
+    if ( ref $self->{output} eq 'GLOB' ) {
+        AE::log debug => "close output file";
+        close $self->{output};
+    }
 
-        print STDERR 'GnuPG: executing `' . join( ' ', @{$cmdline} ) . '`'
-          if $self->{trace};
-
-        exec(@$cmdline)
-          or CORE::die "can't exec gnupg: $!\n";
+    for (
+        qw(protocol proc command options args status_fd command_fd input output next_status )
+      )
+    {
+        AE::log debug => "delete $_";
+        delete $self->{$_};
     }
 }
 
-sub cpr_maybe_send($$$) {
+sub run_gnupg {
+    my $self = shift;
+
+    if ( defined $self->{input} and not ref $self->{input} ) {
+        my $file = $self->{input};
+        open( my $fh, '<', $file ) or die "cannot open file $file: $!";
+        AE::log info => "input file $file opened at $fh";
+        $self->{input} = $fh;
+    }
+
+    if ( defined $self->{output} and not ref $self->{output} ) {
+        my $file = $self->{output};
+        open( my $fh, '>', $file ) or die "cannot open file $file: $!";
+        AE::log info => "output file $file opened at $fh";
+        $self->{output} = $fh;
+    }
+
+    my $cmdline = $self->cmdline;
+
+    my $gpg = shift @$cmdline;
+
+    my $status  = AnyEvent::Proc::reader();
+    my $command = AnyEvent::Proc::writer();
+
+    unshift @$cmdline, '--status-fd'  => $status;
+    unshift @$cmdline, '--command-fd' => $command;
+
+    my $err;
+
+    AE::log debug => "running $gpg " . join( ' ' => @$cmdline );
+    my $proc = AnyEvent::Proc->new(
+        bin     => $gpg,
+        args    => $cmdline,
+        extras  => [ $status, $command ],
+        ttl     => 10,
+        errstr  => \$err,
+        on_exit => sub {
+            AE::log note => $err if $err;
+        },
+    );
+
+    if ( defined $self->{input} ) {
+        AE::log debug => "pull from input";
+        $proc->pull( $self->{input} );
+    }
+
+    if ( defined $self->{output} ) {
+        AE::log debug => "pipe to output";
+        $proc->pipe( $self->{output} );
+    }
+
+    $self->{command_fd} = $command;
+    $self->{status_fd}  = $status;
+    $self->{gnupg_proc} = $proc;
+
+    AE::log debug => "gnupg ready";
+}
+
+sub cpr_maybe_send {
     ( $_[0] )->cpr_send( @_[ 1, $#_ ], 1 );
 }
 
-sub cpr_send($$$;$) {
+sub cpr_send {
     my ( $self, $key, $value, $optional ) = @_;
     my $fd = $self->{command_fd};
 
     my ( $cmd, $arg ) = $self->read_from_status;
-    unless ( defined $cmd && $cmd =~ /^GET_/ ) {
-        $self->abort_gnupg("protocol error: expected GET_XXX got $cmd\n")
-          unless $optional;
+    unless ( $cmd =~ /^GET_/ ) {
+        $self->abort_gnupg("protocol error: expected GET_XXX") unless $optional;
         $self->next_status( $cmd, $arg );
         return;
     }
 
     unless ( $arg eq $key ) {
-        $self->abort_gnupg("protocol error: expected key $key got $arg\n")
+        $self->abort_gnupg("protocol error: expected key $key")
           unless $optional;
         return;
     }
 
-    print STDERR "GnuPG: writing to command fd " . fileno($fd) . ": $value\n"
-      if $self->{trace};
+    AE::log trace => "writing command: $value";
 
-    print $fd $value . "\n";
+    $fd->writeln($value);
 
     ( $cmd, $arg ) = $self->read_from_status;
-    unless ( defined $cmd && $cmd =~ /^GOT_IT/ ) {
+    unless ( $cmd =~ /^GOT_IT/ ) {
         $self->next_status( $cmd, $arg );
     }
 }
 
-sub send_passphrase($$) {
+sub send_passphrase {
     my ( $self, $passwd ) = @_;
 
     # GnuPG should now tell us that it needs a passphrase
@@ -324,18 +276,17 @@ sub send_passphrase($$) {
         $self->next_status($cmd);    # We push this back on for read_from_status
         return;
     }
-    $self->abort_gnupg("Protocol error: expected NEED_PASSPHRASE.* got $cmd\n")
+    $self->abort_gnupg("Protocol error: expected NEED_PASSPHRASE.*")
       unless $cmd =~ /NEED_PASSPHRASE/;
     $self->cpr_send( "passphrase.enter", $passwd );
     unless ($passwd) {
         my $cmd = $self->read_from_status;
-        $self->abort_gnupg(
-            "Protocol error: expected MISSING_PASSPHRASE got $cmd\n")
+        $self->abort_gnupg("Protocol error: expected MISSING_PASSPHRASE")
           unless $cmd eq "MISSING_PASSPHRASE";
     }
 }
 
-sub new($%) {
+sub new {
     my $proto = shift;
     my $class = ref $proto || $proto;
 
@@ -343,24 +294,22 @@ sub new($%) {
 
     my $self = {};
     if ( $args{homedir} ) {
-        croak("Invalid home directory: $args{homedir}\n")
+        croak("Invalid home directory: $args{homedir}")
           unless -d $args{homedir} && -x _;
         $self->{homedir} = $args{homedir};
     }
     if ( $args{options} ) {
-        croak("Invalid options file: $args{options}\n")
-          unless -r $args{options};
+        croak("Invalid options file: $args{options}") unless -r $args{options};
         $self->{options} = $args{options};
     }
     if ( $args{gnupg_path} ) {
-        croak("Invalid gpg path: $args{gnupg_path}\n")
+        croak("Invalid gpg path: $args{gnupg_path}")
           unless -x $args{gnupg_path};
         $self->{gnupg_path} = $args{gnupg_path};
     }
     else {
         my ($path) = grep { -x "$_/gpg" } split /:/, $ENV{PATH};
-        croak("Couldn't find gpg in PATH ($ENV{PATH})\n")
-          unless $path;
+        croak("Couldn't find gpg in PATH ($ENV{PATH})") unless $path;
         $self->{gnupg_path} = "$path/gpg";
     }
     $self->{trace} = $args{trace} ? 1 : 0;
@@ -371,13 +320,10 @@ sub new($%) {
 sub DESTROY {
     my $self = shift;
 
-    # Signal our child that it is the end
-    if ( $self->{gnupg_pid} && kill 0 => $self->{gnupg_pid} ) {
-        kill INT => $self->{gnupg_pid};
-    }
+    $self->{gnupg_proc}->kill if $self->{gnupg_proc};
 }
 
-sub gen_key($%) {
+sub gen_key {
     my ( $self, %args ) = @_;
     my $cmd;
     my $arg;
@@ -396,21 +342,14 @@ sub gen_key($%) {
     my $passphrase = $args{passphrase} || "";
     my $name = $args{name};
 
-    croak "Missing key name\n" unless $name;
-    croak "Invalid name: $name\n"
+    croak "Missing key name" unless $name;
+    croak "Invalid name: $name"
       unless $name =~ /^\s*[^0-9\<\(\[\]\)\>][^\<\(\[\]\)\>]+$/;
 
     my $email = $args{email};
     if ($email) {
-        croak "Invalid email address: $email"
-          unless $email =~ /^\s*        # Whitespace are okay
-                [a-zA-Z0-9_-]    # Doesn't start with a dot
-                [a-zA-Z0-9_.-]*
-                \@        # Contains at most one at
-                [a-zA-Z0-9_.-]+
-                [a-zA-Z0-9_-]    # Doesn't end in a dot
-                   /x
-          && $email !~ /\.\./;
+        ($email) = Email::Address->parse($email)
+          or croak "Invalid email address: $email";
     }
     else {
         $email = "";
@@ -418,7 +357,7 @@ sub gen_key($%) {
 
     my $comment = $args{comment};
     if ($comment) {
-        croak "Invalid characters in comment" if $comment =~ /[()]/;
+        croak "Invalid characters in comment" if $comment =~ /[\(\)]/;
     }
     else {
         $comment = "";
@@ -451,7 +390,7 @@ sub gen_key($%) {
     # Woof. We should now have a generated key !
 }
 
-sub import_keys($%) {
+sub import_keys {
     my ( $self, %args ) = @_;
 
     $self->command("import");
@@ -468,20 +407,18 @@ sub import_keys($%) {
     }
 
     $self->run_gnupg;
-  FILE:
+
     my $num_files = ref $args{keys} ? @{ $args{keys} } : 1;
     my ( $cmd, $arg );
 
     # We will see one IMPORTED for each key that is imported
-  KEY:
-    while (1) {
-        ( $cmd, $arg ) = $self->read_from_status;
-        last KEY unless $cmd =~ /IMPORTED/;
+    while ( ( $cmd, $arg ) = $self->read_from_status ) {
+        last unless $cmd =~ /IMPORTED/;
         $count++;
     }
 
     # We will see one IMPORT_RES for all files processed
-    $self->abort_gnupg("protocol error expected IMPORT_OK got $cmd\n")
+    $self->abort_gnupg("protocol error expected IMPORT_OK got $cmd")
       unless $cmd =~ /IMPORT_OK/;
     $self->end_gnupg;
 
@@ -489,7 +426,7 @@ sub import_keys($%) {
     return $count;
 }
 
-sub export_keys($%) {
+sub export_keys {
     my ( $self, %args ) = @_;
 
     my $options = [];
@@ -518,26 +455,29 @@ sub export_keys($%) {
     $self->end_gnupg;
 }
 
-sub encrypt($%) {
+sub encrypt {
     my ( $self, %args ) = @_;
 
     my $options = [];
-    croak("no recipient specified\n")
+    croak("no recipient specified")
       unless $args{recipient} or $args{symmetric};
 
     for my $recipient (
-        ref $args{recipient} eq 'ARRAY'
-        ? @{ $args{recipient} }
-        : $args{recipient}
+        grep defined,
+        (
+            ref $args{recipient} eq 'ARRAY'
+            ? @{ $args{recipient} }
+            : $args{recipient}
+        )
       )
     {
-        $recipient =~ s/ /\ /g
-          ;  # Escape spaces in the recipient. This fills some strange edge case
+        # Escape spaces in the recipient. This fills some strange edge case
+        $recipient =~ s/ /\ /g;
         push @$options, "--recipient" => $recipient;
     }
 
     push @$options, "--sign" if $args{sign};
-    croak("can't sign an symmetric encrypted message\n")
+    croak("can't sign an symmetric encrypted message")
       if $args{sign} and $args{symmetric};
 
     my $passphrase = $args{passphrase} || "";
@@ -564,7 +504,7 @@ sub encrypt($%) {
         $self->send_passphrase($passphrase);
         if ( $args{sign} ) {
             my ( $cmd, $line ) = $self->read_from_status;
-            $self->abort_gnupg("invalid passphrase - $cmd\n")
+            $self->abort_gnupg("invalid passphrase - $cmd")
               unless $cmd =~ /GOOD_PASSPHRASE/;
         }
     }
@@ -573,10 +513,10 @@ sub encrypt($%) {
     # Assume the caller knows what he is doing.
     $self->cpr_maybe_send( "untrusted_key.override", 'y' );
 
-    $self->end_gnupg unless $args{tie_mode};
+    $self->end_gnupg;
 }
 
-sub sign($%) {
+sub sign {
     my ( $self, %args ) = @_;
 
     my $options = [];
@@ -605,18 +545,17 @@ sub sign($%) {
     # We need to unlock the private key
     $self->send_passphrase($passphrase);
     my ( $cmd, $line ) = $self->read_from_status;
-    $self->abort_gnupg("invalid passphrase - $cmd\n")
-      unless $cmd =~ /GOOD_PASSPHRASE/;
+    $self->abort_gnupg("invalid passphrase") unless $cmd =~ /GOOD_PASSPHRASE/;
 
-    $self->end_gnupg unless $args{tie_mode};
+    $self->end_gnupg;
 }
 
-sub clearsign($%) {
+sub clearsign {
     my $self = shift;
     $self->sign( @_, clearsign => 1 );
 }
 
-sub check_sig($;$$) {
+sub check_sig {
     my ( $self, $cmd, $arg ) = @_;
 
     # Our caller may already have grabbed the first line of
@@ -637,8 +576,7 @@ sub check_sig($;$$) {
     ( $cmd, $arg ) = $self->read_from_status()
       if ( $cmd =~ /IMPORT_RES/ );
 
-    $self->abort_gnupg( "invalid signature from ", $arg =~ /[^ ](.+)/, "\n" )
-      if ( $cmd =~ /BADSIG/ );
+    $self->abort_gnupg("invalid signature from $arg") if ( $cmd =~ /BADSIG/ );
 
     if ( $cmd =~ /ERRSIG/ ) {
         my ( $keyid, $key_algo, $digest_algo, $sig_class, $timestamp, $rc ) =
@@ -687,13 +625,13 @@ sub check_sig($;$$) {
     };
 }
 
-sub verify($%) {
+sub verify {
     my ( $self, %args ) = @_;
 
-    croak("missing signature argument\n") unless $args{signature};
+    croak("missing signature argument") unless $args{signature};
     my $files = [];
     if ( $args{file} ) {
-        croak("detached signature must be in a file\n")
+        croak("detached signature must be in a file")
           unless -f $args{signature};
         push @$files, $args{signature},
           ref $args{file} ? @{ $args{file} } : $args{file};
@@ -713,7 +651,7 @@ sub verify($%) {
     return $sig;
 }
 
-sub decrypt($%) {
+sub decrypt {
     my $self = shift;
     my %args = @_;
 
@@ -725,35 +663,27 @@ sub decrypt($%) {
 
     $self->run_gnupg;
 
-    return $self->decrypt_postwrite(@_) unless $args{tie_mode};
-}
-
-sub decrypt_postwrite($%) {
-    my ( $self, %args ) = @_;
-
     my $passphrase = $args{passphrase} || "";
 
     my ( $cmd, $arg );
     unless ( $args{symmetric} ) {
         ( $cmd, $arg ) = $self->read_from_status;
-        $self->abort_gnupg("protocol error: expected ENC_TO got $cmd: \n")
+        $self->abort_gnupg("protocol error: expected ENC_TO got $cmd")
           unless $cmd =~ /ENC_TO/;
     }
 
     $self->send_passphrase($passphrase);
     ( $cmd, $arg ) = $self->read_from_status;
 
-    $self->abort_gnupg("invalid passphrase - $cmd\n")
-      if $cmd =~ /BAD_PASSPHRASE/;
+    $self->abort_gnupg("invalid passphrase") if $cmd =~ /BAD_PASSPHRASE/;
 
     my $sig = undef;
 
     if ( !$args{symmetric} ) {
-        $self->abort_gnupg(
-            "protocol error: expected GOOD_PASSPHRASE got $cmd: \n")
+        $self->abort_gnupg("protocol error: expected GOOD_PASSPHRASE")
           unless $cmd =~ /GOOD_PASSPHRASE/;
 
-        $sig = $self->decrypt_postread() unless $args{tie_mode};
+        $sig = $self->decrypt_postread();
     }
     else {
         # gnupg 1.0.2 adds this status message
@@ -763,27 +693,26 @@ sub decrypt_postwrite($%) {
         # gnupg 1.4.12 adds this status message
         ( $cmd, $arg ) = $self->read_from_status() if $cmd =~ /DECRYPTION_INFO/;
 
-        $self->abort_gnupg("invalid passphrase - $cmd")
-          unless $cmd =~ /PLAINTEXT/;
+        $self->abort_gnupg("invalid passphrasd") unless $cmd =~ /PLAINTEXT/;
     }
 
-    $self->end_gnupg() unless $args{tie_mode};
+    $self->end_gnupg();
 
     return $sig ? $sig : 1;
 }
 
-sub decrypt_postread($) {
+sub decrypt_postread {
     my $self = shift;
 
     my @cmds;
 
     # gnupg 1.0.2 adds this status message
     my ( $cmd, $arg ) = $self->read_from_status;
-    push @cmds, $cmd;
+    push @cmds, $cmd if $cmd;
 
     if ( $cmd =~ /BEGIN_DECRYPTION/ ) {
         ( $cmd, $arg ) = $self->read_from_status();
-        push @cmds, $cmd;
+        push @cmds, $cmd if $cmd;
     }
 
     my $sig = undef;
@@ -792,13 +721,13 @@ sub decrypt_postread($) {
             $sig = $self->check_sig( $cmd, $arg );
         }
         ( $cmd, $arg ) = $self->read_from_status();
-        push @cmds, $cmd if defined $cmd;
+        push @cmds, $cmd if $cmd;
     }
 
     my $cmds = join ', ', @cmds;
     $self->abort_gnupg(
-"protocol error: expected DECRYPTION_OKAY but never got it (all I saw was: $cmds): \n"
-    ) unless $cmd =~ /DECRYPTION_OKAY/;
+        "protocol error: expected DECRYPTION_OKAY but never got it")
+      unless $cmd =~ /DECRYPTION_OKAY/;
 
     return $sig ? $sig : 1;
 }
