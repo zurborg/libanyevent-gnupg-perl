@@ -1,15 +1,15 @@
 use strict;
 use warnings;
 
-package GnuPG;
+package AnyEvent::GnuPG;
 
-# ABSTRACT: Interface to the GNU Privacy Guard
+# ABSTRACT: AnyEvent-based interface to the GNU Privacy Guard
 
 =head1 SYNOPSIS
 
-    use GnuPG qw( :algo );
+    use AnyEvent::GnuPG qw( :algo );
 
-    my $gpg = new GnuPG();
+    my $gpg = AnyEvent::GnuPG->new();
 
     $gpg->encrypt(
         plaintext   => "file.txt",
@@ -44,15 +44,15 @@ package GnuPG;
 
 =head1 DESCRIPTION
 
-GnuPG is a perl interface to the GNU Privacy Guard. It uses the shared memory coprocess interface that gpg provides for its wrappers. It tries its best to map the interactive interface of the gpg to a more programmatic model.
+AnyEvent::GnuPG is a perl interface to the GNU Privacy Guard. It uses the shared memory coprocess interface that gpg provides for its wrappers. It tries its best to map the interactive interface of the gpg to a more programmatic model.
 
 =head1 API OVERVIEW
 
-The API is accessed through methods on a GnuPG object which is a wrapper around the B<gpg> program. All methods takes their argument using named parameters, and errors are returned by throwing an exception (using croak). If you wan't to catch errors you will have to use eval or L<Try::Tiny>.
+The API is accessed through methods on a AnyEvent::GnuPG object which is a wrapper around the B<gpg> program. All methods takes their argument using named parameters, and errors are returned by throwing an exception (using croak). If you wan't to catch errors you will have to use eval or L<Try::Tiny>.
 
 This modules uses L<AnyEvent::Proc>. For input data, all of L<AnyEvent::Proc/pull> and for output data, all of L<AnyEvent::Proc/pipe> allowed handle types are allowed.
 
-Since the flexible handling with AnyEvent::Proc is available, GnuPG::Tie is now longer supported.
+The code is based on L<GnuPG> with API compatibility except that L<GnuPG::Tie> is B<not> ported.
 
 =cut
 
@@ -431,7 +431,7 @@ sub DESTROY {
 
 =method new(%params)
 
-You create a new GnuPG wrapper object by invoking its new method. (How original!). The module will try to finds the B<gpg> program in your path and will croak if it can't find it. Here are the parameters that it accepts:
+You create a new AnyEvent::GnuPG wrapper object by invoking its new method. (How original!). The module will try to finds the B<gpg> program in your path and will croak if it can't find it. Here are the parameters that it accepts:
 
 =over 4
 
@@ -451,7 +451,7 @@ Path to the B<gpg> home directory. This is the directory that contains the defau
 
 Example:
 
-    my $gpg = new GnuPG();
+    my $gpg = AnyEvent::GnuPG->new();
 
 =cut
 
@@ -1128,6 +1128,8 @@ This module doesn't work (yet) with the v2 branch of GnuPG.
 =head1 SEE ALSO
 
 =over 4
+
+=item * L<GnuPG>
 
 =item * L<gpg(1)>
 

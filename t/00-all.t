@@ -11,7 +11,7 @@ use constant USERID    => "GnuPG Test";
 use constant PASSWD    => "test";
 use constant UNTRUSTED => "Francis";
 
-use GnuPG;
+use AnyEvent::GnuPG;
 
 BEGIN {
     $| = 1;
@@ -49,7 +49,7 @@ if ( defined $ENV{TESTS} ) {
 
 plan tests => scalar @tests;
 
-my $gpg = new GnuPG( homedir => "test", trace => $ENV{TRACING} );
+my $gpg = AnyEvent::GnuPG->new( homedir => "test" );
 
 for (@tests) {
     eval {
