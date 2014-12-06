@@ -837,6 +837,12 @@ sub encrypt {
     push @$options, "--local-user", $args{"local-user"}
       if defined $args{"local-user"};
 
+    push @$options, "--auto-key-locate", $args{"auto-key-locate"}
+      if defined $args{"auto-key-locate"};
+
+    push @$options, "--keyserver", $args{"keyserver"}
+      if defined $args{"keyserver"};
+
     $self->{input} = $args{plaintext} || $args{input};
     $self->{output} = $args{output};
     if ( $args{symmetric} ) {
@@ -1028,8 +1034,25 @@ sub verify {
     else {
         $self->{input} = $args{signature};
     }
+
+    my $options = [];
+
+    push @$options, "--auto-key-locate", $args{"auto-key-locate"}
+      if defined $args{"auto-key-locate"};
+
+    push @$options, "--keyserver", $args{"keyserver"}
+      if defined $args{"keyserver"};
+
+    my @verify_options = ();
+
+    push @verify_options => 'pka-lookups'        if $args{'pka-loopups'};
+    push @verify_options => 'pka-trust-increase' if $args{'pka-trust-increase'};
+
+    push @$options => ( '--verify-options' => join( ',' => @verify_options ) )
+      if @verify_options;
+
     $self->_command("verify");
-    $self->_options( [] );
+    $self->_options($options);
     $self->_args($files);
 
     $self->_run_gnupg;
