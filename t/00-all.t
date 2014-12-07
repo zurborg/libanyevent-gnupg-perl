@@ -6,6 +6,7 @@
 use strict;
 use Test::More;
 use Try::Tiny;
+use Env::Path;
 
 use constant USERID    => "GnuPG Test";
 use constant PASSWD    => "test";
@@ -47,7 +48,12 @@ if ( defined $ENV{TESTS} ) {
     @tests = split /\s+/, $ENV{TESTS};
 }
 
-plan tests => scalar @tests;
+unless ( Env::Path->PATH->Whence('gpg') ) {
+    plan skip_all => 'gpg needed for this module';
+}
+else {
+    plan tests => scalar @tests;
+}
 
 my $gpg = AnyEvent::GnuPG->new( homedir => "test" );
 
