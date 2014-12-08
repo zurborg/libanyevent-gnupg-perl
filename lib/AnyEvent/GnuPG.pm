@@ -301,14 +301,14 @@ sub _run_gnupg {
 
     if ( defined $self->{input} and not ref $self->{input} ) {
         my $file = $self->{input};
-        open( my $fh, "<$file" ) or die "cannot open file $file: $!";
+        open( my $fh, '<', $file ) or die "cannot open file $file: $!";
         AE::log info => "input file $file opened at $fh";
         $self->{input} = $fh;
     }
 
     if ( defined $self->{output} and not ref $self->{output} ) {
         my $file = $self->{output};
-        open( my $fh, ">$file" ) or die "cannot open file $file: $!";
+        open( my $fh, '>', $file ) or die "cannot open file $file: $!";
         AE::log info => "output file $file opened at $fh";
         $self->{output} = $fh;
     }
