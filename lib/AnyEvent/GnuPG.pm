@@ -378,8 +378,8 @@ sub _cpr_send {
         }
 
         unless ( $arg eq $key ) {
-            return $self->_abort_gnupg( "protocol error: expected key '$key' got '$arg'",
-                $cv )
+            return $self->_abort_gnupg(
+                "protocol error: expected key '$key' got '$arg'", $cv )
               unless $optional;
             return $cv->send;
         }
@@ -890,40 +890,7 @@ Asynchronous variant of L</import_key>.
 
 sub import_key_cb {
     my ( $self, $keystr, $cb ) = @_;
-    my $cv = _condvar($cb);
-
-    $self->_command("import");
-    $self->_options( [] );
-
-    $self->{input} = \"$keystr";
-    $self->_args( [] );
-
-    my $proc = $self->_run_gnupg;
-    $proc->finish unless $self->{input};
-
-    chain sub {
-        my $next = shift;
-        $self->_read_from_status( _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        my ( $cmd, $arg ) = @_;
-        return $self->_abort_gnupg( "protocol error expected IMPORTED got $cmd",
-            $cv )
-          unless $cmd =~ /IMPORTED|IMPORT_OK/;
-        $self->_read_from_status( _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        my ( $cmd, $arg ) = @_;
-        return $self->_abort_gnupg(
-            "protocol error expected IMPORT_OK got $cmd", $cv )
-          unless $cmd =~ /IMPORT_OK|IMPORT_RES/;
-        $self->_end_gnupg( _catch( $cv, $next ) );
-      }, sub {
-        shift;
-        $cv->send(@_);
-      };
-
-    $cv;
+    $self->import_keys_cb( keys => \"$keystr", cb => $cb );
 }
 
 =method export_keys(%params)
@@ -1124,6 +1091,7 @@ sub encrypt_cb {
 
     chain sub {
         my $next = shift;
+
         # Unless we decided to sign or are using symmetric cipher, we are done
         if ( $args{sign} or $args{symmetric} ) {
             $self->_send_passphrase( $passphrase, _catch( $cv, $next ) );
@@ -1277,6 +1245,7 @@ sub sign_cb {
 
     chain sub {
         my $next = shift;
+
         # We need to unlock the private key
         $self->_send_passphrase( $passphrase, _catch( $cv, $next ) );
       }, sub {
