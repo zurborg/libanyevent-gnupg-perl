@@ -58,9 +58,11 @@ The code is based on L<GnuPG> with API compatibility except that L<GnuPG::Tie> i
 
 use Exporter 'import';
 use AnyEvent;
-use AnyEvent::Proc 0.102;
+use AnyEvent::Proc 0.104;
 use Email::Address;
-use Carp;
+use Async::Chain;
+use Try::Tiny;
+use Carp qw(confess);
 
 use constant RSA_RSA     => 1;
 use constant DSA_ELGAMAL => 2;
@@ -155,36 +157,72 @@ sub _cmdline {
     return $args;
 }
 
+sub _condvar {
+    my $cb = shift;
+    return $cb if ref $cb eq 'AnyEvent::CondVar';
+    my $cv = AE::cv;
+    $cv->cb($cb) if ref $cb eq 'CODE';
+    $cb ||= '';
+    $cv;
+}
+
+sub _croak {
+    my ( $cv, $msg ) = @_;
+    AE::log error => $msg;
+    $cv->croak($msg);
+    $cv;
+}
+
+sub _catch {
+    my ( $cv1, $cb ) = @_;
+    AE::cv {
+        my $cv2 = shift;
+        try {
+            $cb->( $cv2->recv );
+        }
+        catch {
+            s{ at \S+ line \d+\.\s+$}{};
+            $cv1->croak($_)
+        };
+    }
+}
+
 sub _read_from_status {
-    my $self = shift;
+    my ( $self, $cb ) = @_;
+    my $cv = _condvar($cb);
 
     # Check if a status was pushed back
     if ( $self->{next_status} ) {
         my $status = $self->{next_status};
         $self->{next_status} = undef;
-        return @$status;
+        return $cv->send(@$status);
     }
 
     unless ( $self->{status_fd} ) {
-        $self->_abort_gnupg("status fd not there");
+        return $self->_abort_gnupg( "status fd not there", $cv );
     }
 
-    AE::log debug => "reading from status fd";
-    my $line = $self->{status_fd}->readline;
-    unless ( defined $line ) {
-        $self->_abort_gnupg("got nothing from status fd");
-    }
+    chain sub {
+        my $next = shift;
+        $self->{status_fd}->readline_cb( _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        my $line = shift;
+        unless ( defined $line ) {
+            return $self->_abort_gnupg( "got nothing from status fd", $cv );
+        }
 
-    AE::log debug => "got from status fd: $line";
+        my ( $cmd, $arg ) = $line =~ /\[GNUPG:\] (\w+) ?(.+)?$/;
+        return $self->_abort_gnupg(
+            "error communicating with gnupg: bad status line: $line", $cv )
+          unless $cmd;
+        $arg ||= '';
+        AE::log debug => "got status command: $cmd (arguments: $arg)";
 
-    my ( $cmd, $arg ) = $line =~ /\[GNUPG:\] (\w+) ?(.+)?$/;
-    $self->_abort_gnupg(
-        "error communicating with gnupg: bad status line: $line")
-      unless $cmd;
-    $arg ||= '';
-    AE::log debug => "parsed as: $cmd - $arg";
+        $cv->send( $cmd, $arg );
+      };
 
-    return wantarray ? ( $cmd, $arg ) : $cmd;
+    $cv;
 }
 
 sub _next_status {
@@ -194,53 +232,68 @@ sub _next_status {
 }
 
 sub _abort_gnupg {
-    my ( $self, $msg ) = @_;
+    my ( $self, $msg, $cb ) = @_;
+    my $cv = _condvar($cb);
     AE::log error => $msg if $msg;
-    $self->{gnupg_proc}->fire_and_kill(10) if $self->{gnupg_proc};
-    AE::log debug => "fired and killed";
-    $self->_end_gnupg;
-    AE::log debug => "gnupg aborted";
-    confess($msg);
+    if ( $self->{gnupg_proc} ) {
+        $self->{gnupg_proc}->fire_and_kill(
+            10,
+            sub {
+                AE::log debug => "fired and killed";
+                $self->_end_gnupg(
+                    sub {
+                        AE::log debug => "gnupg aborted";
+                        $cv->croak($msg);
+                    }
+                );
+            }
+        );
+    }
+    $cv;
 }
 
 sub _end_gnupg {
-    my $self = shift;
+    my ( $self, $cb ) = @_;
+    my $cv = _condvar($cb);
 
     if ( ref $self->{input} eq 'GLOB' ) {
-        AE::log debug => "close input file";
         close $self->{input};
     }
 
     if ( $self->{command_fd} ) {
-        AE::log debug => "finish command fd";
         $self->{command_fd}->finish;
     }
 
-    if ( $self->{status_fd} ) {
-        AE::log debug => "destroy status fd";
+    if ( 0 && $self->{status_fd} ) {
         $self->{status_fd}->A->destroy;
     }
 
     if ( $self->{gnupg_proc} ) {
-        AE::log debug => "finish proc";
-        $self->{gnupg_proc}->finish;
-        AE::log debug => "waiting...";
-        my $exitcode = $self->{gnupg_proc}->wait;
-        AE::log debug => "exited with $exitcode";
-    }
 
-    if ( ref $self->{output} eq 'GLOB' ) {
-        AE::log debug => "close output file";
-        close $self->{output};
-    }
+        $self->{gnupg_proc}->wait(
+            sub {
+                if ( ref $self->{output} eq 'GLOB' ) {
+                    close $self->{output};
+                }
 
-    for (
-        qw(protocol proc command options args status_fd command_fd input output next_status )
-      )
-    {
-        AE::log debug => "delete $_";
-        delete $self->{$_};
+                for (
+                    qw(protocol proc command options args status_fd command_fd input output next_status )
+                  )
+                {
+                    delete $self->{$_};
+                }
+
+                AE::log debug => "gnupg exited";
+                $cv->send;
+            }
+        );
+
+        #});
     }
+    else {
+        $cv->send;
+    }
+    $cv;
 }
 
 sub _run_gnupg {
@@ -248,14 +301,14 @@ sub _run_gnupg {
 
     if ( defined $self->{input} and not ref $self->{input} ) {
         my $file = $self->{input};
-        open( my $fh, '<', $file ) or die "cannot open file $file: $!";
+        open( my $fh, "<$file" ) or die "cannot open file $file: $!";
         AE::log info => "input file $file opened at $fh";
         $self->{input} = $fh;
     }
 
     if ( defined $self->{output} and not ref $self->{output} ) {
         my $file = $self->{output};
-        open( my $fh, '>', $file ) or die "cannot open file $file: $!";
+        open( my $fh, ">$file" ) or die "cannot open file $file: $!";
         AE::log info => "output file $file opened at $fh";
         $self->{output} = $fh;
     }
@@ -274,24 +327,19 @@ sub _run_gnupg {
 
     AE::log debug => "running $gpg " . join( ' ' => @$cmdline );
     my $proc = AnyEvent::Proc->new(
-        bin     => $gpg,
-        args    => $cmdline,
-        extras  => [ $status, $command ],
-        ttl     => 300,
-        errstr  => \$err,
-        on_exit => sub {
-            AE::log note => $err if $err;
-        },
+        bin    => $gpg,
+        args   => $cmdline,
+        extras => [ $status, $command ],
+        ttl    => 300,
+        errstr => \$err,
     );
 
     if ( defined $self->{input} ) {
-        AE::log debug => "pull from input";
         $proc->pull( $self->{input} );
     }
 
     if ( defined $self->{output} ) {
-        AE::log debug => "pipe to output";
-        $proc->pipe( $self->{output} );
+        $proc->pipe( out => $self->{output} );
     }
 
     $self->{command_fd} = $command;
@@ -299,128 +347,240 @@ sub _run_gnupg {
     $self->{gnupg_proc} = $proc;
 
     AE::log debug => "gnupg ready";
+
+    $proc;
 }
 
 sub _cpr_maybe_send {
-    ( $_[0] )->_cpr_send( @_[ 1, $#_ ], 1 );
+    my ( $self, $key, $value, $cb ) = @_;
+    $self->_cpr_send( $key, $value, 1, $cb );
 }
 
 sub _cpr_send {
-    my ( $self, $key, $value, $optional ) = @_;
+    my ( $self, $key, $value, $optional, $cb ) = @_;
+    my $cv = _condvar($cb);
+
+    AE::log debug => "sending key '$key' with value '$value'";
+
     my $fd = $self->{command_fd};
 
-    my ( $cmd, $arg ) = $self->_read_from_status;
-    unless ( $cmd =~ /^GET_/ ) {
-        $self->_abort_gnupg("protocol error: expected GET_XXX")
-          unless $optional;
-        $self->_next_status( $cmd, $arg );
-        return;
-    }
+    chain sub {
+        my $next = shift;
+        $self->_read_from_status( _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        my ( $cmd, $arg ) = @_;
+        unless ( $cmd =~ /^GET_/ ) {
+            return $self->_abort_gnupg( "protocol error: expected GET_*", $cv )
+              unless $optional;
+            $self->_next_status( $cmd, $arg );
+            return $cv->send;
+        }
 
-    unless ( $arg eq $key ) {
-        $self->_abort_gnupg("protocol error: expected key $key")
-          unless $optional;
-        return;
-    }
+        unless ( $arg eq $key ) {
+            return $self->_abort_gnupg( "protocol error: expected key '$key' got '$arg'",
+                $cv )
+              unless $optional;
+            return $cv->send;
+        }
 
-    $fd->writeln($value);
+        $fd->writeln($value);
 
-    ( $cmd, $arg ) = $self->_read_from_status;
-    unless ( $cmd =~ /^GOT_IT/ ) {
-        $self->_next_status( $cmd, $arg );
-    }
+        $self->_read_from_status( _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        my ( $cmd, $arg ) = @_;
+        unless ( $cmd =~ /^GOT_IT/ ) {
+            $self->_next_status( $cmd, $arg );
+        }
+        $cv->send;
+      };
+    $cv;
 }
 
 sub _send_passphrase {
-    my ( $self, $passwd ) = @_;
+    my ( $self, $passwd, $cb ) = @_;
+    my $cv = _condvar($cb);
 
-    # GnuPG should now tell us that it needs a passphrase
-    my $cmd = $self->_read_from_status;
+    chain sub {
+        my $next = shift;
 
-    # Skip UserID hint
-    $cmd = $self->_read_from_status if ( $cmd =~ /USERID_HINT/ );
-    if ( $cmd =~ /GOOD_PASSPHRASE/ ) {   # This means we didnt need a passphrase
-        $self->_next_status($cmd);   # We push this back on for read_from_status
-        return;
-    }
-    $self->_abort_gnupg("Protocol error: expected NEED_PASSPHRASE.*")
-      unless $cmd =~ /NEED_PASSPHRASE/;
-    $self->_cpr_send( "passphrase.enter", $passwd );
-    unless ($passwd) {
-        my $cmd = $self->_read_from_status;
-        $self->_abort_gnupg("Protocol error: expected MISSING_PASSPHRASE")
+        # GnuPG should now tell us that it needs a passphrase
+        $self->_read_from_status( _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        my ($cmd) = @_;
+
+        # Skip UserID hint
+        if ( $cmd =~ /USERID_HINT/ ) {
+            $self->_read_from_status( _catch( $cv, $next ) );
+        }
+        else {
+            $next->($cmd);
+        }
+      }, sub {
+        my $next = shift;
+        my ($cmd) = @_;
+        if ( $cmd =~ /GOOD_PASSPHRASE/ )
+        {    # This means we didnt need a passphrase
+            $self->_next_status($cmd)
+              ;    # We push this back on for read_from_status
+            return $cv->send;
+        }
+
+        return $self->_abort_gnupg(
+            "Protocol error: expected NEED_PASSPHRASE got $cmd", $cv )
+          unless $cmd =~ /NEED_PASSPHRASE/;
+        $self->_cpr_send( "passphrase.enter", $passwd, 0,
+            _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        unless ($passwd) {
+            $self->_read_from_status( _catch($next) );
+        }
+        else {
+            $next->skip->();
+        }
+      }, sub {
+        my $next = shift;
+        my ($cmd) = @_;
+        return $self->_abort_gnupg(
+            "Protocol error: expected MISSING_PASSPHRASE got $cmd", $cv )
           unless $cmd eq "MISSING_PASSPHRASE";
-    }
+        $next->();
+      }, sub {
+        $cv->send;
+      };
+    $cv;
 }
 
 sub _check_sig {
-    my ( $self, $cmd, $arg ) = @_;
+    my ( $self, $cmd, $arg, $cb ) = @_;
+    my $cv = _condvar($cb);
 
-    # Our caller may already have grabbed the first line of
-    # signature reporting.
-    ( $cmd, $arg ) = $self->_read_from_status unless ($cmd);
+    my ( $sigid, $date, $time, $keyid, $name, $policy_url, $fingerprint,
+        $trust );
 
-    # Ignore patent warnings.
-    ( $cmd, $arg ) = $self->_read_from_status()
-      if ( $cmd =~ /RSA_OR_IDEA/ );
+    chain sub {
+        my $next = shift;
 
-    # Ignore automatic key imports
-    ( $cmd, $arg ) = $self->_read_from_status()
-      if ( $cmd =~ /IMPORTED/ );
-
-    ( $cmd, $arg ) = $self->_read_from_status()
-      if ( $cmd =~ /IMPORT_OK/ );
-
-    ( $cmd, $arg ) = $self->_read_from_status()
-      if ( $cmd =~ /IMPORT_RES/ );
-
-    $self->_abort_gnupg("invalid signature from $arg") if ( $cmd =~ /BADSIG/ );
-
-    if ( $cmd =~ /ERRSIG/ ) {
-        my ( $keyid, $key_algo, $digest_algo, $sig_class, $timestamp, $rc ) =
-          split ' ', $arg;
-        if ( $rc == 9 ) {
-            ( $cmd, $arg ) = $self->_read_from_status();
-            $self->_abort_gnupg("no public key $keyid");
+        # Our caller may already have grabbed the first line of
+        # signature reporting.
+        if ($cmd) {
+            $next->( $cmd, $arg );
         }
-        $self->_abort_gnupg("error verifying signature from $keyid");
-    }
+        else {
+            $self->_read_from_status( _catch( $cv, $next ) );
+        }
+      }, sub {
+        my $next = shift;
+        ( $cmd, $arg ) = @_;
 
-    $self->_abort_gnupg("protocol error: expected SIG_ID")
-      unless $cmd =~ /SIG_ID/;
-    my ( $sigid, $date, $time ) = split /\s+/, $arg;
+        # Ignore patent warnings.
+        if ( $cmd =~ /RSA_OR_IDEA/ ) {
+            $self->_read_from_status( _catch( $cv, $next ) );
+        }
+        else {
+            $next->(@_);
+        }
+      }, sub {
+        my $next = shift;
+        ( $cmd, $arg ) = @_;
 
-    ( $cmd, $arg ) = $self->_read_from_status;
-    $self->_abort_gnupg("protocol error: expected GOODSIG")
-      unless $cmd =~ /GOODSIG/;
-    my ( $keyid, $name ) = split /\s+/, $arg, 2;
+        # Ignore automatic key imports
+        if ( $cmd =~ /IMPORTED/ ) {
+            $self->_read_from_status( _catch( $cv, $next ) );
+        }
+        else {
+            $next->(@_);
+        }
+      }, sub {
+        my $next = shift;
+        ( $cmd, $arg ) = @_;
+        if ( $cmd =~ /IMPORT_OK/ ) {
+            $self->_read_from_status( _catch( $cv, $next ) );
+        }
+        else {
+            $next->(@_);
+        }
+      }, sub {
+        my $next = shift;
+        ( $cmd, $arg ) = @_;
+        if ( $cmd =~ /IMPORT_RES/ ) {
+            $self->_read_from_status( _catch( $cv, $next ) );
+        }
+        else {
+            $next->(@_);
+        }
+      }, sub {
+        my $next = shift;
+        ( $cmd, $arg ) = @_;
+        if ( $cmd =~ /BADSIG/ ) {
+            return $self->_abort_gnupg( "invalid signature from $arg", $cv );
+        }
+        if ( $cmd =~ /ERRSIG/ ) {
+            my ( $keyid, $key_algo, $digest_algo, $sig_class, $timestamp, $rc )
+              = split ' ', $arg;
+            if ( $rc == 9 ) {
+                return $self->_abort_gnupg( "no public key $keyid", $cv );
+            }
+            else {
+                return $self->_abort_gnupg(
+                    "error verifying signature from $keyid", $cv );
+            }
+        }
+        return $self->_abort_gnupg( "protocol error: expected SIG_ID", $cv )
+          unless $cmd =~ /SIG_ID/;
+        ( $sigid, $date, $time ) = split /\s+/, $arg;
+        $self->_read_from_status( _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        ( $cmd, $arg ) = @_;
+        return $self->_abort_gnupg( "protocol error: expected GOODSIG", $cv )
+          unless $cmd =~ /GOODSIG/;
+        ( $keyid, $name ) = split /\s+/, $arg, 2;
 
-    ( $cmd, $arg ) = $self->_read_from_status;
-    my $policy_url = undef;
-    if ( $cmd =~ /POLICY_URL/ ) {
-        $policy_url = $arg;
-        ( $cmd, $arg ) = $self->_read_from_status;
-    }
+        $self->_read_from_status( _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        ( $cmd, $arg ) = @_;
+        if ( $cmd =~ /POLICY_URL/ ) {
+            $policy_url = $arg;
+            $self->_read_from_status( _catch( $cv, $next ) );
+        }
+        else {
+            $next->(@_);
+        }
+      }, sub {
+        my $next = shift;
+        ( $cmd, $arg ) = @_;
 
-    $self->_abort_gnupg("protocol error: expected VALIDSIG")
-      unless $cmd =~ /VALIDSIG/;
-    my ($fingerprint) = split /\s+/, $arg, 2;
+        return $self->_abort_gnupg( "protocol error: expected VALIDSIG", $cv )
+          unless $cmd =~ /VALIDSIG/;
+        ($fingerprint) = split /\s+/, $arg, 2;
 
-    ( $cmd, $arg ) = $self->_read_from_status;
-    $self->_abort_gnupg("protocol error: expected TRUST*")
-      unless $cmd =~ /TRUST/;
-    my ($trust) = _parse_trust($cmd);
+        $self->_read_from_status( _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        ( $cmd, $arg ) = @_;
+        return $self->_abort_gnupg( "protocol error: expected TRUST*", $cv )
+          unless $cmd =~ /TRUST/;
+        ($trust) = _parse_trust($cmd);
 
-    return {
-        sigid       => $sigid,
-        date        => $date,
-        timestamp   => $time,
-        keyid       => $keyid,
-        user        => $name,
-        fingerprint => $fingerprint,
-        trust       => $trust,
-        policy_url  => $policy_url,
-    };
+        $cv->send(
+            {
+                sigid       => $sigid,
+                date        => $date,
+                timestamp   => $time,
+                keyid       => $keyid,
+                user        => $name,
+                fingerprint => $fingerprint,
+                trust       => $trust,
+                policy_url  => $policy_url,
+            }
+        );
+      };
+    $cv;
 }
 
 sub DESTROY {
@@ -463,22 +623,23 @@ sub new {
 
     my $self = {};
     if ( $args{homedir} ) {
-        croak("Invalid home directory: $args{homedir}")
+        confess("Invalid home directory: $args{homedir}")
           unless -d $args{homedir} && -x _;
         $self->{homedir} = $args{homedir};
     }
     if ( $args{options} ) {
-        croak("Invalid options file: $args{options}") unless -r $args{options};
+        confess("Invalid options file: $args{options}")
+          unless -r $args{options};
         $self->{options} = $args{options};
     }
     if ( $args{gnupg_path} ) {
-        croak("Invalid gpg path: $args{gnupg_path}")
+        confess("Invalid gpg path: $args{gnupg_path}")
           unless -x $args{gnupg_path};
         $self->{gnupg_path} = $args{gnupg_path};
     }
     else {
         my ($path) = grep { -x "$_/gpg" } split /:/, $ENV{PATH};
-        croak("Couldn't find gpg in PATH ($ENV{PATH})") unless $path;
+        confess("Couldn't find gpg in PATH ($ENV{PATH})") unless $path;
         $self->{gnupg_path} = "$path/gpg";
     }
 
@@ -532,7 +693,18 @@ Example:
 =cut
 
 sub gen_key {
+    shift->gen_key_cb(@_)->recv;
+}
+
+=method gen_key_cb(%params[, cb => $callback|$condvar])
+
+Asynchronous variant of L</gen_key>.
+
+=cut
+
+sub gen_key_cb {
     my ( $self, %args ) = @_;
+    my $cv = _condvar( delete $args{cb} );
     my $cmd;
     my $arg;
 
@@ -541,8 +713,8 @@ sub gen_key {
 
     my $size = $args{size};
     $size ||= 1024;
-    croak("Keysize is too small: $size") if $size < 768;
-    croak("Keysize is too big: $size")   if $size > 2048;
+    return _croak( $cv, "Keysize is too small: $size" ) if $size < 768;
+    return _croak( $cv, "Keysize is too big: $size" )   if $size > 2048;
 
     my $expire = $args{valid};
     $expire ||= 0;
@@ -550,14 +722,14 @@ sub gen_key {
     my $passphrase = $args{passphrase} || "";
     my $name = $args{name};
 
-    croak "Missing key name" unless $name;
-    croak "Invalid name: $name"
+    return _croak( $cv, "Missing key name" ) unless $name;
+    return _croak( $cv, "Invalid name: $name" )
       unless $name =~ /^\s*[^0-9\<\(\[\]\)\>][^\<\(\[\]\)\>]+$/;
 
     my $email = $args{email};
     if ($email) {
         ($email) = Email::Address->parse($email)
-          or croak "Invalid email address: $email";
+          or _croak( $cv, "Invalid email address: $email" );
     }
     else {
         $email = "";
@@ -565,7 +737,7 @@ sub gen_key {
 
     my $comment = $args{comment};
     if ($comment) {
-        croak "Invalid characters in comment" if $comment =~ /[\(\)]/;
+        _croak( $cv, "Invalid characters in comment" ) if $comment =~ /[\(\)]/;
     }
     else {
         $comment = "";
@@ -575,27 +747,37 @@ sub gen_key {
     $self->_options( [] );
     $self->_args(    [] );
 
-    $self->_run_gnupg;
+    my $proc = $self->_run_gnupg;
+    $proc->finish unless $self->{input};
 
-    $self->_cpr_send( "keygen.algo", $algo );
-
-    #    if ( $algo == ELGAMAL ) {
-    #        # Shitty interactive program, yes I'm sure.
-    #        # I'm a program, I can't change my mind now.
-    #        $self->_cpr_send( "keygen.algo.elg_se", 1 )
-    #    }
-
-    $self->_cpr_send( "keygen.size",    $size );
-    $self->_cpr_send( "keygen.valid",   $expire );
-    $self->_cpr_send( "keygen.name",    $name );
-    $self->_cpr_send( "keygen.email",   $email );
-    $self->_cpr_send( "keygen.comment", $comment );
-
-    $self->_send_passphrase($passphrase);
-
-    $self->_end_gnupg;
-
-    # Woof. We should now have a generated key !
+    chain sub {
+        my $next = shift;
+        $self->_cpr_send( "keygen.algo", $algo, 0, _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        $self->_cpr_send( "keygen.size", $size, 0, _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        $self->_cpr_send( "keygen.valid", $expire, 0, _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        $self->_cpr_send( "keygen.name", $name, 0, _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        $self->_cpr_send( "keygen.email", $email, 0, _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        $self->_cpr_send( "keygen.comment", $comment, 0, _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        $self->_send_passphrase( $passphrase, _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        $self->_end_gnupg( _catch( $cv, $next ) );
+      }, sub {
+        $cv->send(@_);
+      };
+    $cv;
 }
 
 =method import_keys(%params)
@@ -619,7 +801,18 @@ Example:
 =cut
 
 sub import_keys {
+    shift->import_keys_cb(@_)->recv;
+}
+
+=method import_keys_cb(%args[, cb => $callback|$condvar])
+
+Asynchronous variant of L</import_keys>.
+
+=cut
+
+sub import_keys_cb {
     my ( $self, %args ) = @_;
+    my $cv = _condvar( delete $args{cb} );
 
     $self->_command("import");
     $self->_options( [] );
@@ -634,24 +827,46 @@ sub import_keys {
         $self->_args( [] );
     }
 
-    $self->_run_gnupg;
+    my $proc = $self->_run_gnupg;
+    $proc->finish unless $self->{input};
 
     my $num_files = ref $args{keys} ? @{ $args{keys} } : 1;
-    my ( $cmd, $arg );
 
-    # We will see one IMPORTED for each key that is imported
-    while ( ( $cmd, $arg ) = $self->_read_from_status ) {
-        last unless $cmd =~ /IMPORTED/;
-        $count++;
-    }
+    my ( $sub1, $sub2, $sub3 );
 
-    # We will see one IMPORT_RES for all files processed
-    $self->_abort_gnupg("protocol error expected IMPORT_OK got $cmd")
-      unless $cmd =~ /IMPORT_OK/;
-    $self->_end_gnupg;
+    $sub1 = sub {
+        my ( $cmd, $arg ) = @_;
+        if ( $cmd =~ /IMPORTED/ ) {
+            $count++;
+            $sub2->();
+        }
+        else {
+            $sub3->( $cmd, $arg );
+        }
+    };
 
-    # We return the number of imported keys
-    return $count;
+    $sub3 = sub {
+        my ( $cmd, $arg ) = @_;
+        return $self->_abort_gnupg(
+            "protocol error expected IMPORT_OK got $cmd", $cv )
+          unless $cmd =~ /IMPORT_OK/;
+        $self->_end_gnupg(
+            _catch(
+                $cv,
+                sub {
+                    $cv->send($count);
+                }
+            )
+        );
+    };
+
+    $sub2 = sub {
+        $self->_read_from_status( _catch( $cv, $sub1 ) );
+    };
+
+    $sub2->();
+
+    $cv;
 }
 
 =method import_key($string)
@@ -665,7 +880,18 @@ Example:
 =cut
 
 sub import_key {
-    my ( $self, $keystr ) = @_;
+    shift->import_key_cb(@_)->recv;
+}
+
+=method import_key_cb($string[, $callback|$condvar])
+
+Asynchronous variant of L</import_key>.
+
+=cut
+
+sub import_key_cb {
+    my ( $self, $keystr, $cb ) = @_;
+    my $cv = _condvar($cb);
 
     $self->_command("import");
     $self->_options( [] );
@@ -673,20 +899,32 @@ sub import_key {
     $self->{input} = \"$keystr";
     $self->_args( [] );
 
-    $self->_run_gnupg;
-    $self->{gnupg_proc}->finish;
+    my $proc = $self->_run_gnupg;
+    $proc->finish unless $self->{input};
 
-    my ( $cmd, $arg );
+    chain sub {
+        my $next = shift;
+        $self->_read_from_status( _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        my ( $cmd, $arg ) = @_;
+        return $self->_abort_gnupg( "protocol error expected IMPORTED got $cmd",
+            $cv )
+          unless $cmd =~ /IMPORTED|IMPORT_OK/;
+        $self->_read_from_status( _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        my ( $cmd, $arg ) = @_;
+        return $self->_abort_gnupg(
+            "protocol error expected IMPORT_OK got $cmd", $cv )
+          unless $cmd =~ /IMPORT_OK|IMPORT_RES/;
+        $self->_end_gnupg( _catch( $cv, $next ) );
+      }, sub {
+        shift;
+        $cv->send(@_);
+      };
 
-    ( $cmd, $arg ) = $self->_read_from_status;
-    $self->_abort_gnupg("protocol error expected IMPORTED got $cmd")
-      unless $cmd =~ /IMPORTED|IMPORT_OK/;
-
-    ( $cmd, $arg ) = $self->_read_from_status;
-    $self->_abort_gnupg("protocol error expected IMPORT_OK got $cmd")
-      unless $cmd =~ /IMPORT_OK|IMPORT_RES/;
-
-    $self->_end_gnupg;
+    $cv;
 }
 
 =method export_keys(%params)
@@ -727,7 +965,18 @@ Example:
 =cut
 
 sub export_keys {
+    shift->export_keys_cb(@_)->recv;
+}
+
+=method export_keys_cb(%params[, cb => $callback|$condvar])
+
+Asynchronous variant of L</export_keys>.
+
+=cut
+
+sub export_keys_cb {
     my ( $self, %args ) = @_;
+    my $cv = _condvar( delete $args{cb} );
 
     my $options = [];
     push @$options, "--armor" if $args{armor};
@@ -748,11 +997,17 @@ sub export_keys {
     else {
         $self->_command("export");
     }
+
     $self->_options($options);
     $self->_args($keys);
 
-    $self->_run_gnupg;
-    $self->_end_gnupg;
+    my $proc = $self->_run_gnupg;
+
+    $proc->finish unless $self->{input};
+
+    $self->_end_gnupg( _catch( $cv, sub { $cv->send(@_) } ) );
+
+    $cv;
 }
 
 =method encrypt(%params)
@@ -807,7 +1062,18 @@ Example:
 =cut
 
 sub encrypt {
+    shift->encrypt_cb(@_)->recv;
+}
+
+=method encrypt_cb(%params[, cb => $callback|$condvar])
+
+Asynchronous variant of L</encrypt>.
+
+=cut
+
+sub encrypt_cb {
     my ( $self, %args ) = @_;
+    my $cv = _condvar( delete $args{cb} );
 
     my $options = [];
     croak("no recipient specified")
@@ -854,23 +1120,79 @@ sub encrypt {
     $self->_options($options);
     $self->_args( [] );
 
-    $self->_run_gnupg;
+    my $proc = $self->_run_gnupg;
+    $proc->finish unless $self->{input};
 
-    # Unless we decided to sign or are using symmetric cipher, we are done
-    if ( $args{sign} or $args{symmetric} ) {
-        $self->_send_passphrase($passphrase);
-        if ( $args{sign} ) {
-            my ( $cmd, $line ) = $self->_read_from_status;
-            $self->_abort_gnupg("invalid passphrase - $cmd")
-              unless $cmd =~ /GOOD_PASSPHRASE/;
+    chain sub {
+        my $next = shift;
+        # Unless we decided to sign or are using symmetric cipher, we are done
+        if ( $args{sign} or $args{symmetric} ) {
+            $self->_send_passphrase( $passphrase, _catch( $cv, $next ) );
         }
-    }
+        else {
+            $next->skip(2)->();
+        }
+      }, sub {
+        my $next = shift;
+        if ( $args{sign} ) {
+            $self->_read_from_status( _catch( $cv, $next ) );
+        }
+        else {
+            $next->skip->();
+        }
+      }, sub {
+        my $next = shift;
+        my ( $cmd, $arg ) = @_;
+        return $self->_abort_gnupg( "invalid passphrase - $cmd", $cv )
+          unless $cmd =~ /GOOD_PASSPHRASE/;
+        $next->();
+      }, sub {
+        my $next = shift;
 
-    # It is possible that this key has no assigned trust value.
-    # Assume the caller knows what he is doing.
-    $self->_cpr_maybe_send( "untrusted_key.override", 'y' );
+        # It is possible that this key has no assigned trust value.
+        # Assume the caller knows what he is doing.
+        $self->_cpr_maybe_send( "untrusted_key.override", 'y',
+            _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        $self->_read_from_status( _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        my ( $cmd, $arg ) = @_;
+        unless ( $args{sign} ) {
+            return $next->skip->(@_);
+        }
+        return $self->_abort_gnupg(
+            "protocol error expected BEGIN_SIGN got $cmd", $cv )
+          unless $cmd =~ /BEGIN_SIGN/;
+        $self->_read_from_status( _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        my ( $cmd, $arg ) = @_;
+        return $self->_abort_gnupg(
+            "protocol error expected SIG_CREATED got $cmd", $cv )
+          unless $cmd =~ /SIG_CREATED/;
+        $self->_read_from_status( _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        my ( $cmd, $arg ) = @_;
+        return $self->_abort_gnupg(
+            "protocol error expected BEGIN_ENCRYPTION got $cmd", $cv )
+          unless $cmd =~ /BEGIN_ENCRYPTION/;
+        $self->_read_from_status( _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        my ( $cmd, $arg ) = @_;
+        return $self->_abort_gnupg(
+            "protocol error expected END_ENCRYPTION got $cmd", $cv )
+          unless $cmd =~ /END_ENCRYPTION/;
+        $self->_end_gnupg( _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        $cv->send(@_);
+      };
 
-    $self->_end_gnupg;
+    $cv;
 }
 
 =method sign(%params)
@@ -917,7 +1239,18 @@ Example:
 =cut
 
 sub sign {
+    shift->sign_cb(@_)->recv;
+}
+
+=method sign_cb(%params[, cb => $callback|$condvar])
+
+Asynchronous variant of L</sign>.
+
+=cut
+
+sub sign_cb {
     my ( $self, %args ) = @_;
+    my $cv = _condvar( delete $args{cb} );
 
     my $options = [];
     my $passphrase = $args{passphrase} || "";
@@ -940,14 +1273,28 @@ sub sign {
     $self->_options($options);
     $self->_args( [] );
 
-    $self->_run_gnupg;
+    my $proc = $self->_run_gnupg;
+    $proc->finish unless $self->{input};
 
-    # We need to unlock the private key
-    $self->_send_passphrase($passphrase);
-    my ( $cmd, $line ) = $self->_read_from_status;
-    $self->_abort_gnupg("invalid passphrase") unless $cmd =~ /GOOD_PASSPHRASE/;
+    chain sub {
+        my $next = shift;
+        # We need to unlock the private key
+        $self->_send_passphrase( $passphrase, _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        $self->_read_from_status( _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        my ( $cmd, $line ) = @_;
+        return $self->_abort_gnupg( "invalid passphrase", $cv )
+          unless $cmd =~ /GOOD_PASSPHRASE/;
+        $self->_end_gnupg( _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        $cv->send(@_);
+      };
 
-    $self->_end_gnupg;
+    $cv;
 }
 
 =head2 clearsign(%params)
@@ -959,6 +1306,17 @@ This methods clearsign a message. The output will contains the original message 
 sub clearsign {
     my $self = shift;
     $self->sign( @_, clearsign => 1 );
+}
+
+=method clearsign_cb(%params[, cb => $callback|$condvar])
+
+Asynchronous variant of L</clearsign>.
+
+=cut
+
+sub clearsign_cb {
+    my $self = shift;
+    $self->sign_cb( @_, clearsign => 1 );
 }
 
 =method verify(%params)
@@ -1021,12 +1379,23 @@ Example:
 =cut
 
 sub verify {
-    my ( $self, %args ) = @_;
+    shift->verify_cb(@_)->recv;
+}
 
-    croak("missing signature argument") unless $args{signature};
+=method verify_cb(%params[, cb => $callback|$condvar])
+
+Asynchronous variant of L</verify>.
+
+=cut
+
+sub verify_cb {
+    my ( $self, %args ) = @_;
+    my $cv = _condvar( delete $args{cb} );
+
+    return _croak( $cv, "missing signature argument" ) unless $args{signature};
     my $files = [];
     if ( $args{file} ) {
-        croak("detached signature must be in a file")
+        return _croak( $cv, "detached signature must be in a file" )
           unless -f $args{signature};
         push @$files, $args{signature},
           ref $args{file} ? @{ $args{file} } : $args{file};
@@ -1055,12 +1424,23 @@ sub verify {
     $self->_options($options);
     $self->_args($files);
 
-    $self->_run_gnupg;
-    my $sig = $self->_check_sig;
+    my $proc = $self->_run_gnupg;
+    $proc->finish unless $self->{input};
 
-    $self->_end_gnupg;
+    my $sig;
 
-    return $sig;
+    chain sub {
+        my $next = shift;
+        $self->_check_sig( undef, undef, _catch( $cv, $next ) );
+      }, sub {
+        my $next = shift;
+        ($sig) = @_;
+        $self->_end_gnupg( _catch( $cv, $next ) );
+      }, sub {
+        $cv->send($sig);
+      };
+
+    $cv;
 }
 
 =method decrypt(%params)
@@ -1098,8 +1478,18 @@ Example:
 =cut
 
 sub decrypt {
-    my $self = shift;
-    my %args = @_;
+    shift->decrypt_cb(@_)->recv;
+}
+
+=method decrypt_cb(%params[, cb => $callback|$condvar])
+
+Asynchronous variant of L</decrypt>.
+
+=cut
+
+sub decrypt_cb {
+    my ( $self, %args ) = @_;
+    my $cv = _condvar( delete $args{cb} );
 
     $self->{input} = $args{ciphertext} || $args{input};
     $self->{output} = $args{output};
@@ -1107,76 +1497,110 @@ sub decrypt {
     $self->_options( [] );
     $self->_args(    [] );
 
-    $self->_run_gnupg;
+    my $proc = $self->_run_gnupg;
+    $proc->finish unless $self->{input};
 
     my $passphrase = $args{passphrase} || "";
 
-    my ( $cmd, $arg );
-    unless ( $args{symmetric} ) {
-        ( $cmd, $arg ) = $self->_read_from_status;
-        $self->_abort_gnupg("protocol error: expected ENC_TO got $cmd")
-          unless $cmd =~ /ENC_TO/;
-    }
+    my $sig;
 
-    $self->_send_passphrase($passphrase);
-    ( $cmd, $arg ) = $self->_read_from_status;
+    if ( $args{symmetric} ) {
 
-    $self->_abort_gnupg("invalid passphrase") if $cmd =~ /BAD_PASSPHRASE/;
+        chain sub {
+            my $next = shift;
+            $self->_send_passphrase( $passphrase, _catch( $cv, $next ) );
+          }, sub {
+            my $next = shift;
+            $self->_read_from_status( _catch( $cv, $next ) );
+          }, sub {
+            my $next = shift;
+            my ( $cmd, $arg ) = @_;
+            return $self->_abort_gnupg( "invalid passphrase", $cv )
+              if $cmd =~ /BAD_PASSPHRASE/;
+            $self->_read_from_status( _catch( $cv, $next ) );
+          }, sub {
+            my $next = shift;
+            my ( $cmd, $arg ) = @_;
+            if ( $cmd =~ /BEGIN_DECRYPTION/ ) {
+                $self->_read_from_status( _catch( $cv, $next ) );
+            }
+            else {
+                $next->(@_);
+            }
+          }, sub {
+            my $next = shift;
+            my ( $cmd, $arg ) = @_;
+            if ( $cmd =~ /DECRYPTION_INFO/ ) {
+                $self->_read_from_status( _catch( $cv, $next ) );
+            }
+            else {
+                $next->(@_);
+            }
+          }, sub {
+            my $next = shift;
+            my ( $cmd, $arg ) = @_;
+            return $self->_abort_gnupg(
+                "protocol error expected PLAINTEXT got $cmd", $cv )
+              unless $cmd =~ /PLAINTEXT/;
+            $self->_end_gnupg( _catch( $cv, $next ) );
+          }, sub {
+            $cv->send($sig);
+          };
 
-    my $sig = undef;
-
-    if ( !$args{symmetric} ) {
-        $self->_abort_gnupg("protocol error: expected GOOD_PASSPHRASE")
-          unless $cmd =~ /GOOD_PASSPHRASE/;
-
-        $sig = $self->_decrypt_postread();
     }
     else {
-        # gnupg 1.0.2 adds this status message
-        ( $cmd, $arg ) = $self->_read_from_status()
-          if $cmd =~ /BEGIN_DECRYPTION/;
 
-        # gnupg 1.4.12 adds this status message
-        ( $cmd, $arg ) = $self->_read_from_status()
-          if $cmd =~ /DECRYPTION_INFO/;
+        chain sub {
+            my $next = shift;
+            $self->_read_from_status( _catch( $cv, $next ) );
+          }, sub {
+            my $next = shift;
+            $self->_send_passphrase( $passphrase, _catch( $cv, $next ) );
+          }, sub {
+            my $next = shift;
+            $self->_read_from_status( _catch( $cv, $next ) );
+          }, sub {
+            my $next = shift;
+            my ( $cmd, $arg ) = @_;
+            return $self->_abort_gnupg( "invalid passphrase", $cv )
+              unless $cmd =~ /GOOD_PASSPHRASE/;
+            $self->_read_from_status( _catch( $cv, $next ) );
+          }, sub {
+            my $next = shift;
+            my ( $cmd, $arg ) = @_;
+            if ( $cmd =~ /BEGIN_DECRYPTION/ ) {
+                $self->_read_from_status( _catch( $cv, $next ) );
+            }
+            else {
+                $next->(@_);
+            }
+          }, sub {
+            my $next = shift;
+            my ( $cmd, $arg ) = @_;
+            if ( $cmd =~ /SIG_ID/ ) {
+                $self->_check_sig( $cmd, $arg, $next );
+            }
+            else {
+                $next->skip->(@_);
+            }
+          }, sub {
+            my $next = shift;
+            ($sig) = @_;
+            $self->_read_from_status( _catch( $cv, $next ) );
+          }, sub {
+            my $next = shift;
+            my ( $cmd, $arg ) = @_;
+            return $self->_abort_gnupg(
+                "protocol error expected DECRYPTION_INFO got $cmd", $cv )
+              unless $cmd =~ /DECRYPTION_INFO/;
+            $self->_end_gnupg( _catch( $cv, $next ) );
+          }, sub {
+            $cv->send($sig);
+          };
 
-        $self->_abort_gnupg("invalid passphrasd") unless $cmd =~ /PLAINTEXT/;
     }
 
-    $self->_end_gnupg();
-
-    return $sig ? $sig : 1;
-}
-
-sub _decrypt_postread {
-    my $self = shift;
-
-    my @cmds;
-
-    # gnupg 1.0.2 adds this status message
-    my ( $cmd, $arg ) = $self->_read_from_status;
-    push @cmds, $cmd if $cmd;
-
-    if ( $cmd =~ /BEGIN_DECRYPTION/ ) {
-        ( $cmd, $arg ) = $self->_read_from_status();
-        push @cmds, $cmd if $cmd;
-    }
-
-    my $sig = undef;
-    while ( defined $cmd && !( $cmd =~ /DECRYPTION_OKAY/ ) ) {
-        if ( $cmd =~ /SIG_ID/ ) {
-            $sig = $self->_check_sig( $cmd, $arg );
-        }
-        ( $cmd, $arg ) = $self->_read_from_status();
-        push @cmds, $cmd if $cmd;
-    }
-
-    my $cmds = join ', ', @cmds;
-    $self->_abort_gnupg(
-        "protocol error: expected DECRYPTION_OKAY but never got it")
-      unless $cmd =~ /DECRYPTION_OKAY/;
-
-    return $sig ? $sig : 1;
+    $cv;
 }
 
 =head1 BUGS AND LIMITATIONS
