@@ -50,9 +50,28 @@ AnyEvent::GnuPG is a perl interface to the GNU Privacy Guard. It uses the shared
 
 The API is accessed through methods on a AnyEvent::GnuPG object which is a wrapper around the B<gpg> program. All methods takes their argument using named parameters, and errors are returned by throwing an exception (using croak). If you wan't to catch errors you will have to use eval or L<Try::Tiny>.
 
-This modules uses L<AnyEvent::Proc>. For input data, all of L<AnyEvent::Proc/pull> and for output data, all of L<AnyEvent::Proc/pipe> allowed handle types are allowed.
+This modules uses L<AnyEvent::Proc>. For input data, all of L<AnyEvent::Proc/pull> and for output data, all of L<AnyEvent::Proc/pipe> possible handle types are allowed.
 
 The code is based on L<GnuPG> with API compatibility except that L<GnuPG::Tie> is B<not> ported.
+
+=head2 CALLBACKS AND CONDITION VARIABLES
+
+Every method has a callback variant, suffixed with I<_cb>. These methods accept an optional parameter called I<cb>, which can be a CodeRef or an L<AnyEvent>::CondVar and returns a condvar.
+
+    $gpg->method_cb(%params, cb => sub {
+        my $result = shift->recv; # croaks on error
+        ...
+    });
+
+    my $cv = $gpg->method_cb(%params);
+    my $result = $cv->recv; # croaks on error
+    ...
+
+The non-callback variants are all wrapper methods, looking something like this:
+
+    sub method {
+        shift->method_cb(@_)->recv
+    }
 
 =cut
 
@@ -782,13 +801,13 @@ sub gen_key_cb {
 
 =method import_keys(%params)
 
-Import keys into the GnuPG private or public keyring. The method croaks if it encounters an error. It returns the number of keys imported. Parameters:
+Import keys into the GnuPG private or public keyring. The method croaks if it encounters an error. Parameters:
 
 =over 4
 
 =item * keys
 
-Only parameter and mandatory. It can either be a filename or a reference to an array containing a list of files that will be imported.
+Only parameter and mandatory. It can either be an ArrayRef containing a list of files that will be imported or a single file name or anything else that L<AnyEvent::Proc/pull> accepts.
 
 =back
 
@@ -806,7 +825,7 @@ sub import_keys {
 
 =method import_keys_cb(%args[, cb => $callback|$condvar])
 
-Asynchronous variant of L</import_keys>.
+Asynchronous variant of L</import_keys>. It returns the number of keys imported.
 
 =cut
 
@@ -913,7 +932,7 @@ If this argument is set to true, all keys (even those that aren't OpenPGP compli
 
 =item * output
 
-This argument specifies where the keys will be exported. Can be either a file name or a reference to a file handle.
+This argument specifies where the keys will be exported. Can be either a file name or anything else that L<AnyEvent::Proc/pipe> accepts.
 
 =item * armor
 
@@ -984,11 +1003,11 @@ This method is used to encrypt a message, either using assymetric or symmetric c
 
 =item * plaintext
 
-This argument specifies what to encrypt. It can be either a filename or a reference to a file handle.
+This argument specifies what to encrypt. It can be either a file name or anything else that L<AnyEvent::Proc/pull> accepts.
 
 =item * output
 
-This optional argument specifies where the ciphertext will be output. It can be either a file name or a reference to a file handle.
+This optional argument specifies where the ciphertext will be output. It can be either a file name or anything else that L<AnyEvent::Proc/pipe> acceptse.
 
 =item * armor
 
@@ -1165,17 +1184,18 @@ sub encrypt_cb {
 =method sign(%params)
 
 This method is used create a signature for a file or stream of data.
+
 This method croaks on errors. Parameters:
 
 =over 4
 
 =item * plaintext
 
-This argument specifies what  to sign. It can be either a filename or a reference to a file handle.
+This argument specifies what to sign. It can be either a file name or anything else that L<AnyEvent::Proc/pull> accepts.
 
 =item * output
 
-This optional argument specifies where the signature will be output. It can be either a file name or a reference to a file handle.
+This optional argument specifies where the signature will be output. It can be either a file name or anything else that L<AnyEvent::Proc/pipe> accepts.
 
 =item * armor
 
@@ -1265,7 +1285,7 @@ sub sign_cb {
     $cv;
 }
 
-=head2 clearsign(%params)
+=method clearsign(%params)
 
 This methods clearsign a message. The output will contains the original message with a signature appended. It takes the same parameters as the L</sign> method.
 
@@ -1295,11 +1315,13 @@ This method verifies a signature against the signed message. The methods croaks 
 
 =item * signature
 
-If the message and the signature are in the same file (i.e. a clearsigned message), this parameter can be either a file name or a reference to a file handle. If the signature doesn't follows the message, than it must be the name of the file that contains the signature.
+If the message and the signature are in the same file (i.e. a clearsigned message), this parameter can be either a file name or anything else that L<AnyEvent::Proc/pull> accepts.
+
+If the signature doesn't follows the message, than it must be the name of the file that contains the signature and the parameter I<file> must be used to name the signed data.
 
 =item * file
 
-This is a file name or a reference to an array of file names that contains the signed data.
+This is the name of a file or an ArrayRef of file names that contains the signed data.
 
 =back
 
@@ -1421,7 +1443,7 @@ This optional parameter contains either the name of the file containing the ciph
 
 =item * output
 
-This optional parameter determines where the plaintext will be stored. It can be either a file name or a reference to a file handle.
+This optional parameter determines where the plaintext will be stored. It can be either a file name or anything else that L<AnyEvent::Proc/pipe> accepts.
 
 =item * symmetric
 
