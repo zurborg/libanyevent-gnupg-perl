@@ -76,7 +76,7 @@ for (@tests) {
 
 sub multiple_recipients {
     die unless -s "test/file.txt";
-    diag $gpg->encrypt(
+    $gpg->encrypt(
         recipient => [ USERID, UNTRUSTED ],
         output    => "test/file.txt.gpg",
         armor     => 1,
@@ -87,26 +87,26 @@ sub multiple_recipients {
 
 sub gen_key_test {
     diag "Generating a key - can take some time";
-    diag $gpg->gen_key(
+    $gpg->gen_key(
         passphrase => PASSWD,
         name       => USERID,
     );
 }
 
 sub import_test {
-    diag $gpg->import_keys( keys => "test/key1.pub" );
+    $gpg->import_keys( keys => "test/key1.pub" );
 }
 
 sub import2_test {
-    diag $gpg->import_keys( keys => "test/key1.pub" );
+    $gpg->import_keys( keys => "test/key1.pub" );
 }
 
 sub import3_test {
-    diag $gpg->import_keys( keys => [qw( test/key1.pub test/key2.pub )] );
+    $gpg->import_keys( keys => [qw( test/key1.pub test/key2.pub )] );
 }
 
 sub export_test {
-    diag $gpg->export_keys(
+    $gpg->export_keys(
         keys   => USERID,
         armor  => 1,
         output => "test/key.pub",
@@ -115,7 +115,7 @@ sub export_test {
 }
 
 sub export2_test {
-    diag $gpg->export_keys(
+    $gpg->export_keys(
         armor  => 1,
         output => "test/keyring.pub",
     );
@@ -123,7 +123,7 @@ sub export2_test {
 }
 
 sub export_secret_test {
-    diag $gpg->export_keys(
+    $gpg->export_keys(
         secret => 1,
         armor  => 1,
         output => "test/key.sec",
@@ -133,7 +133,7 @@ sub export_secret_test {
 
 sub encrypt_test {
     die unless -s "test/file.txt";
-    diag $gpg->encrypt(
+    $gpg->encrypt(
         recipient => USERID,
         output    => "test/file.txt.gpg",
         armor     => 1,
@@ -145,7 +145,7 @@ sub encrypt_test {
 sub pipe_encrypt_test {
     die unless -s "test/file.txt";
     open CAT, "| cat > test/pipe-file.txt.gpg" or die "can't fork: $!\n";
-    diag $gpg->encrypt(
+    $gpg->encrypt(
         recipient => USERID,
         output    => \*CAT,
         armor     => 1,
@@ -157,7 +157,7 @@ sub pipe_encrypt_test {
 
 sub encrypt_sign_test {
     die unless -s "test/file.txt";
-    diag $gpg->encrypt(
+    $gpg->encrypt(
         recipient  => USERID,
         output     => "test/file.txt.sgpg",
         armor      => 1,
@@ -170,7 +170,7 @@ sub encrypt_sign_test {
 
 sub encrypt_sym_test {
     die unless -s "test/file.txt";
-    diag $gpg->encrypt(
+    $gpg->encrypt(
         output     => "test/file.txt.cipher",
         armor      => 1,
         plaintext  => "test/file.txt",
@@ -182,7 +182,7 @@ sub encrypt_sym_test {
 
 sub encrypt_notrust_test {
     die unless -s "test/file.txt";
-    diag $gpg->encrypt(
+    $gpg->encrypt(
         recipient  => UNTRUSTED,
         output     => "test/file.txt.dist.gpg",
         armor      => 1,
@@ -195,7 +195,7 @@ sub encrypt_notrust_test {
 
 sub sign_test {
     die unless -s "test/file.txt";
-    diag $gpg->sign(
+    $gpg->sign(
         recipient  => USERID,
         output     => "test/file.txt.sig",
         armor      => 1,
@@ -207,7 +207,7 @@ sub sign_test {
 
 sub detachsign_test {
     die unless -s "test/file.txt";
-    diag $gpg->sign(
+    $gpg->sign(
         recipient     => USERID,
         output        => "test/file.txt.asc",
         "detach-sign" => 1,
@@ -220,7 +220,7 @@ sub detachsign_test {
 
 sub clearsign_test {
     die unless -s "test/file.txt";
-    diag $gpg->clearsign(
+    $gpg->clearsign(
         output     => "test/file.txt.clear",
         armor      => 1,
         plaintext  => "test/file.txt",
@@ -231,7 +231,7 @@ sub clearsign_test {
 
 sub decrypt_test {
     die unless -s "test/file.txt.gpg";
-    diag $gpg->decrypt(
+    $gpg->decrypt(
         output     => "test/file.txt.plain",
         ciphertext => "test/file.txt.gpg",
         passphrase => PASSWD,
@@ -242,7 +242,7 @@ sub decrypt_test {
 sub pipe_decrypt_test {
     die unless -s "test/file.txt.gpg";
     open CAT, "cat test/file.txt.gpg|" or die "can't fork: $!\n";
-    diag $gpg->decrypt(
+    $gpg->decrypt(
         output     => "test/file.txt.plain",
         ciphertext => \*CAT,
         passphrase => PASSWD,
@@ -253,7 +253,7 @@ sub pipe_decrypt_test {
 
 sub decrypt_sign_test {
     die unless -s "test/file.txt.sgpg";
-    diag $gpg->decrypt(
+    $gpg->decrypt(
         output     => "test/file.txt.plain2",
         ciphertext => "test/file.txt.sgpg",
         passphrase => PASSWD,
@@ -263,7 +263,7 @@ sub decrypt_sign_test {
 
 sub decrypt_sym_test {
     die unless -s "test/file.txt.cipher";
-    diag $gpg->decrypt(
+    $gpg->decrypt(
         output     => "test/file.txt.plain3",
         ciphertext => "test/file.txt.cipher",
         symmetric  => 1,
@@ -274,13 +274,13 @@ sub decrypt_sym_test {
 
 sub verify_sign_test {
     die unless -s "test/file.txt.sig";
-    diag $gpg->verify( signature => "test/file.txt.sig" );
+    $gpg->verify( signature => "test/file.txt.sig" );
 }
 
 sub verify_detachsign_test {
     die unless -s "test/file.txt.asc";
     die unless -s "test/file.txt";
-    diag $gpg->verify(
+    $gpg->verify(
         signature => "test/file.txt.asc",
         file      => "test/file.txt",
     );
@@ -288,13 +288,13 @@ sub verify_detachsign_test {
 
 sub verify_clearsign_test {
     die unless -s "test/file.txt.clear";
-    diag $gpg->verify( signature => "test/file.txt.clear" );
+    $gpg->verify( signature => "test/file.txt.clear" );
 }
 
 sub encrypt_from_fh_test {
     die unless -s "test/file.txt";
     open( FH, "test/file.txt" ) or die "error opening file: $!\n";
-    diag $gpg->encrypt(
+    $gpg->encrypt(
         recipient => UNTRUSTED,
         output    => "test/file-fh.txt.gpg",
         armor     => 1,
@@ -307,7 +307,7 @@ sub encrypt_from_fh_test {
 sub encrypt_to_fh_test {
     die unless -s "test/file.txt";
     open( FH, ">test/file-fho.txt.gpg" ) or die "error opening file: $!\n";
-    diag $gpg->encrypt(
+    $gpg->encrypt(
         recipient => UNTRUSTED,
         output    => \*FH,
         armor     => 1,
