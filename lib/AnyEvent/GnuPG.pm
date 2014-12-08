@@ -775,7 +775,7 @@ sub gen_key_cb {
         my $next = shift;
         $self->_end_gnupg( _catch( $cv, $next ) );
       }, sub {
-        $cv->send(@_);
+        $cv->send( {} );
       };
     $cv;
 }
@@ -801,7 +801,7 @@ Example:
 =cut
 
 sub import_keys {
-    shift->import_keys_cb(@_)->recv;
+    shift->import_keys_cb(@_)->recv->{count};
 }
 
 =method import_keys_cb(%args[, cb => $callback|$condvar])
@@ -817,12 +817,11 @@ sub import_keys_cb {
     $self->_command("import");
     $self->_options( [] );
 
-    my $count;
-    if ( ref $args{keys} ) {
+    my $count = 0;
+    if ( ref $args{keys} eq 'ARRAY' ) {
         $self->_args( $args{keys} );
     }
     else {
-        # Only one file to import
         $self->{input} = $args{keys};
         $self->_args( [] );
     }
@@ -854,7 +853,7 @@ sub import_keys_cb {
             _catch(
                 $cv,
                 sub {
-                    $cv->send($count);
+                    $cv->send( { count => $count } );
                 }
             )
         );
@@ -1005,7 +1004,7 @@ sub export_keys_cb {
 
     $proc->finish unless $self->{input};
 
-    $self->_end_gnupg( _catch( $cv, sub { $cv->send(@_) } ) );
+    $self->_end_gnupg( _catch( $cv, sub { $cv->send( {} ) } ) );
 
     $cv;
 }
@@ -1189,7 +1188,7 @@ sub encrypt_cb {
         $self->_end_gnupg( _catch( $cv, $next ) );
       }, sub {
         my $next = shift;
-        $cv->send(@_);
+        $cv->send( {} );
       };
 
     $cv;
@@ -1291,7 +1290,7 @@ sub sign_cb {
         $self->_end_gnupg( _catch( $cv, $next ) );
       }, sub {
         my $next = shift;
-        $cv->send(@_);
+        $cv->send( {} );
       };
 
     $cv;
@@ -1395,10 +1394,8 @@ sub verify_cb {
     return _croak( $cv, "missing signature argument" ) unless $args{signature};
     my $files = [];
     if ( $args{file} ) {
-        return _croak( $cv, "detached signature must be in a file" )
-          unless -f $args{signature};
-        push @$files, $args{signature},
-          ref $args{file} ? @{ $args{file} } : $args{file};
+        $args{file} = [ $args{file} ] unless ref $args{file};
+        @$files = ( $args{signature}, @{ $args{file} } );
     }
     else {
         $self->{input} = $args{signature};
@@ -1427,7 +1424,7 @@ sub verify_cb {
     my $proc = $self->_run_gnupg;
     $proc->finish unless $self->{input};
 
-    my $sig;
+    my $sig = {};
 
     chain sub {
         my $next = shift;
@@ -1502,7 +1499,7 @@ sub decrypt_cb {
 
     my $passphrase = $args{passphrase} || "";
 
-    my $sig;
+    my $sig = {};
 
     if ( $args{symmetric} ) {
 
