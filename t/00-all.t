@@ -20,6 +20,7 @@ BEGIN {
 
 my @tests = (
     qw(
+      version
       gen_key_test
       import_test
       import2_test
@@ -72,6 +73,14 @@ for (@tests) {
         }
       }
 
+}
+
+sub version {
+    my @version = $gpg->version;
+    ok @version;
+    is shift(@version) => 1,
+      'gpg v1 ok'
+      or BAIL_OUT "this module works only with gpg v1";
 }
 
 sub multiple_recipients {

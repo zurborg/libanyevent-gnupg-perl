@@ -665,6 +665,56 @@ sub new {
     bless $self, $class;
 }
 
+=method version
+
+This method returns the current gpg version as list.
+
+    my @version = $gpg->version;
+    # returns ( 1, 4, 18 ) for example
+
+=cut
+
+sub version {
+    shift->version_cb(@_)->recv;
+}
+
+=method version_cb
+
+Asynchronous variant of L</version>.
+
+=cut
+
+sub version_cb {
+    my ( $self, $cb ) = @_;
+    my $cv = _condvar($cb);
+
+    $self->_command("version");
+    $self->_options( [] );
+    $self->_args(    [] );
+
+    my $version;
+
+    my $proc = $self->_run_gnupg;
+
+    $proc->pipe( \$version );
+
+    $proc->finish;
+
+    $self->_end_gnupg(
+        sub {
+            if ( $version =~ m{\d(?:\.\d)*} ) {
+                $cv->send( split m{\.} => $& );
+            }
+            else {
+                $cv->croak(
+                    "cannot obtain version number from string: '$version'");
+            }
+        }
+    );
+
+    $cv;
+}
+
 =method gen_key(%params)
 
 This methods is used to create a new gpg key pair. The methods croaks if there is an error. It is a good idea to press random keys on the keyboard while running this methods because it consumes a lot of entropy from the computer. Here are the parameters it accepts:
