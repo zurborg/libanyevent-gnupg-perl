@@ -907,6 +907,7 @@ sub gen_key_cb {
 
     $self->_parse_status(
         $cv,
+        progress => $args{progress},
         get_line => sub {
             my ($key) = @_;
             for ($key) {
