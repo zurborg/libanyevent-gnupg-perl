@@ -206,48 +206,233 @@ sub _catch {
     }
 }
 
-sub _read_from_status {
-    my ( $self, $cb ) = @_;
-    my $cv = _condvar($cb);
+sub _eq($_) { shift eq pop }    ## no critic
 
-    # Check if a status was pushed back
-    if ( $self->{next_status} ) {
-        my $status = $self->{next_status};
-        $self->{next_status} = undef;
-        return $cv->send(@$status);
-    }
+sub _parse_status {
+    my ( $self, $cv, %actions ) = @_;
+    my $commands;
+    $self->{status_fd}->readlines_cb(
+        sub {
+            my $line = shift;
+            unless ( defined $line ) {
+                AE::log debug => "end of status parsing";
+                $cv->send($commands);
+            }
+            if ( my ( $cmd, $arg ) =
+                $line =~ m{^\[gnupg:\]\s+(\w+)\s*(.+)?\s*$}i )
+            {
+                $arg ||= '';
+                my @args = $arg ? ( split /\s+/, $arg ) : ();
+                AE::log debug => "got command: $cmd ($arg)";
+                try {
+                    for ( lc $cmd ) {
+                        _eq('newsig')  && do { last };
+                        _eq('goodsig') && do { last };
+                        _eq('expsig')
+                          && do { die "the signature is expired ($arg)" };
+                        _eq('expkeysig') && do {
+                            die
+                              "the signature was made by an expired key ($arg)";
+                        };
+                        _eq('revkeysig') && do {
+                            die
+                              "the signature was made by an revoked key ($arg)";
+                        };
+                        _eq('badsig') && do {
+                            die
+                              "the signature has not been verified okay ($arg)";
+                        };
+                        _eq('errsig') && do {
+                            die "the signature could not be verified ($arg)";
+                        };
+                        _eq('validsig') && do { last };
+                        _eq('sig_id')   && do { last };
+                        _eq('enc_to')   && do { last };
+                        _eq('nodata')   && do {
+                            for ($arg) {
+                                _eq('1') && die "no armored data";
+                                _eq('2')
+                                  && die
+                                  "expected a packet but did not found one";
+                                _eq('3') && die "invalid packet found";
+                                _eq('4')
+                                  && die "signature expected but not found";
+                                die "no data has been found";
+                            }
+                        };
+                        _eq('unexpected')
+                          && do { die "unexpected data has been encountered" };
+                        _eq('trust_undefined')
+                          && do { die "signature trust undefined: $arg" };
+                        _eq('trust_never')
+                          && do { die "signature trust is never: $arg" };
+                        _eq('trust_marginal') && do { last };
+                        _eq('trust_fully')    && do { last };
+                        _eq('trust_ultimate') && do { last };
+                        _eq('pka_trust_good') && do { last };
+                        _eq('pka_trust_bad')  && do { last };
+                        _eq('sigexpired')
+                          or _eq('keyexpired') && do {
+                            die "the key has expired since "
+                              . ( scalar localtime $arg );
+                          };
+                        _eq('keyrevoked') && do {
+                            die "the used key has been revoked by its owner";
+                        };
+                        _eq('badarmor')
+                          && do { die "the ASCII armor is corrupted" };
+                        _eq('rsa_or_idea')         && do { last };
+                        _eq('shm_info')            && do { last };
+                        _eq('shm_get')             && do { last };
+                        _eq('shm_get_bool')        && do { last };
+                        _eq('shm_get_hidden')      && do { last };
+                        _eq('get_bool')            && do { last };
+                        _eq('get_line')            && do { last };
+                        _eq('get_hidden')          && do { last };
+                        _eq('got_it')              && do { last };
+                        _eq('need_passphrase')     && do { last };
+                        _eq('need_passphrase_sym') && do { last };
+                        _eq('need_passphrase_pin') && do { last };
+                        _eq('missing_passphrase')
+                          && do { die "no passphrase was supplied" };
+                        _eq('bad_passphrase') && do {
+                            die
+                              "the supplied passphrase was wrong or not given";
+                        };
+                        _eq('good_passphrase') && do { last };
+                        _eq('decryption_failed')
+                          && do { die "the symmetric decryption failed" };
+                        _eq('decryption_okay') && do { last };
+                        _eq('decryption_info') && do { last };
+                        _eq('no_pubkey')
+                          && do { die "the public key is not available" };
+                        _eq('no_seckey')
+                          && do { die "the private key is not available" };
+                        _eq('import_check') && do { last };
+                        _eq('imported')
+                          && do { @args = split /\s+/, $arg, 2; last };
+                        _eq('import_ok') && do { last };
+                        _eq('import_problem') && do {
 
-    unless ( $self->{status_fd} ) {
-        return $self->_abort_gnupg( "status fd not there", $cv );
-    }
+                            for ($arg) {
+                                _eq('0')
+                                  && die
+                                  "import failed with no specific reason";
+                                _eq('1') && die "invalid certificate";
+                                _eq('2') && die "issuer certificate missing";
+                                _eq('3') && die "certificate chain too long";
+                                _eq('4') && die "error storing certificate";
+                                die "import failed";
+                            }
+                        };
+                        _eq('import_res')       && do { last };
+                        _eq('file_start')       && do { last };
+                        _eq('file_done')        && do { last };
+                        _eq('begin_decryption') && do { last };
+                        _eq('end_decryption')   && do { last };
+                        _eq('begin_encryption') && do { last };
+                        _eq('end_encryption')   && do { last };
+                        _eq('begin_signing')    && do { last };
+                        _eq('delete_problem')   && do {
 
-    chain sub {
-        my $next = shift;
-        $self->{status_fd}->readline_cb( _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        my $line = shift;
-        unless ( defined $line ) {
-            return $self->_abort_gnupg( "got nothing from status fd", $cv );
+                            for ($arg) {
+                                _eq('1') && die "delete failed: no such key";
+                                _eq('2')
+                                  && die
+                                  "delete failed: must delete secret key first";
+                                _eq('3')
+                                  && die
+                                  "delete failed: ambigious specification";
+                                die "delete failed";
+                            }
+                        };
+                        _eq('progress')    && do { last };
+                        _eq('sig_created') && do { last };
+                        _eq('key_created') && do { last };
+                        _eq('key_not_created') && do {
+                            die "the key from batch run has not been created";
+                        };
+                        _eq('session_key')   && do { last };
+                        _eq('notation_name') && do { last };
+                        _eq('notation_data') && do { last };
+                        _eq('userid_hint')   && do { last };
+                        _eq('policy_url')    && do { last };
+                        _eq('begin_stream')  && do { last };
+                        _eq('end_stream')    && do { last };
+                        ( _eq('inv_recp') or _eq('inc_sgnr') ) && do {
+                            my $prefix = 'invalid';
+                            for ($cmd) {
+                                _eq('inv_recp')
+                                  && do { $prefix .= ' recipient' };
+                                _eq('inv_sgnr') && do { $prefix .= ' sender' };
+                            }
+                            $prefix .= ': ';
+                            for ( shift(@args) ) {
+                                _eq('0') && die $prefix . "no specific reason";
+                                _eq('1') && die $prefix . "not found";
+                                _eq('2')
+                                  && die $prefix . "ambigious specification";
+                                _eq('3')  && die $prefix . "wrong key usage";
+                                _eq('4')  && die $prefix . "key revoked";
+                                _eq('5')  && die $prefix . "key expired";
+                                _eq('6')  && die $prefix . "no CRL known";
+                                _eq('7')  && die $prefix . "CRL too old";
+                                _eq('8')  && die $prefix . "policy mismatch";
+                                _eq('9')  && die $prefix . "not a secret key";
+                                _eq('10') && die $prefix . "key not trusted";
+                                _eq('11')
+                                  && die $prefix . "missing certificate";
+                                _eq('12')
+                                  && die $prefix . "missing issuer certificate";
+                                die $prefix . '???';
+                            }
+                        };
+                        _eq('no_recp') && do { die "no recipients are usable" };
+                        _eq('no_sgnr') && do { die "no senders are usable" };
+                        _eq('already_signed')   && do { last };
+                        _eq('truncated')        && do { last };
+                        _eq('error')            && do { die $arg };
+                        _eq('success')          && do { last };
+                        _eq('attribute')        && do { last };
+                        _eq('cardctrl')         && do { last };
+                        _eq('plaintext')        && do { last };
+                        _eq('plaintext_length') && do { last };
+                        _eq('sig_subpacket')    && do { last };
+                        _eq('sc_op_failure')
+                          && do { die "smartcard failure ($arg)" };
+                        _eq('sc_op_success')      && do { last };
+                        _eq('backup_key_created') && do { last };
+                        _eq('mountpoint')         && do { last };
+                        AE::log note => "unknown command: $cmd";
+                    }
+                    my $result;
+                    if ( $actions{ lc($cmd) } ) {
+                        $result = $actions{ lc($cmd) }->(@args);
+                    }
+                    push @$commands => {
+                        cmd    => $cmd,
+                        arg    => $arg,
+                        args   => \@args,
+                        result => $result
+                    };
+                }
+                catch {
+                    s{\s+$}{};
+                    $self->_abort_gnupg( $_, $cv );
+                }
+                finally {
+                    AE::log debug => "arguments parsed as: ["
+                      . ( join ', ', map { "'$_'" } @args ) . "]";
+                }
+            }
+            else {
+                return $self->_abort_gnupg(
+                    "error communicating with gnupg: bad status line: $line",
+                    $cv );
+            }
         }
-
-        my ( $cmd, $arg ) = $line =~ /\[GNUPG:\] (\w+) ?(.+)?$/;
-        return $self->_abort_gnupg(
-            "error communicating with gnupg: bad status line: $line", $cv )
-          unless $cmd;
-        $arg ||= '';
-        AE::log debug => "got status command: $cmd (arguments: $arg)";
-
-        $cv->send( $cmd, $arg );
-      };
-
+    );
     $cv;
-}
-
-sub _next_status {
-    my ( $self, $cmd, $arg ) = @_;
-
-    $self->{next_status} = [ $cmd, $arg ];
 }
 
 sub _abort_gnupg {
@@ -307,7 +492,6 @@ sub _end_gnupg {
             }
         );
 
-        #});
     }
     else {
         $cv->send;
@@ -370,110 +554,12 @@ sub _run_gnupg {
     $proc;
 }
 
-sub _cpr_maybe_send {
-    my ( $self, $key, $value, $cb ) = @_;
-    $self->_cpr_send( $key, $value, 1, $cb );
-}
-
-sub _cpr_send {
-    my ( $self, $key, $value, $optional, $cb ) = @_;
-    my $cv = _condvar($cb);
-
-    AE::log debug => "sending key '$key' with value '$value'";
-
-    my $fd = $self->{command_fd};
-
-    chain sub {
-        my $next = shift;
-        $self->_read_from_status( _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        my ( $cmd, $arg ) = @_;
-        unless ( $cmd =~ /^GET_/ ) {
-            return $self->_abort_gnupg( "protocol error: expected GET_*", $cv )
-              unless $optional;
-            $self->_next_status( $cmd, $arg );
-            return $cv->send;
-        }
-
-        unless ( $arg eq $key ) {
-            return $self->_abort_gnupg(
-                "protocol error: expected key '$key' got '$arg'", $cv )
-              unless $optional;
-            return $cv->send;
-        }
-
-        $fd->writeln($value);
-
-        $self->_read_from_status( _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        my ( $cmd, $arg ) = @_;
-        unless ( $cmd =~ /^GOT_IT/ ) {
-            $self->_next_status( $cmd, $arg );
-        }
-        $cv->send;
-      };
-    $cv;
-}
-
-sub _send_passphrase {
-    my ( $self, $passwd, $cb ) = @_;
-    my $cv = _condvar($cb);
-
-    chain sub {
-        my $next = shift;
-
-        # GnuPG should now tell us that it needs a passphrase
-        $self->_read_from_status( _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        my ($cmd) = @_;
-
-        # Skip UserID hint
-        if ( $cmd =~ /USERID_HINT/ ) {
-            $self->_read_from_status( _catch( $cv, $next ) );
-        }
-        else {
-            $next->($cmd);
-        }
-      }, sub {
-        my $next = shift;
-        my ($cmd) = @_;
-        if ( $cmd =~ /GOOD_PASSPHRASE/ )
-        {    # This means we didnt need a passphrase
-            $self->_next_status($cmd)
-              ;    # We push this back on for read_from_status
-            return $cv->send;
-        }
-
-        return $self->_abort_gnupg(
-            "Protocol error: expected NEED_PASSPHRASE got $cmd", $cv )
-          unless $cmd =~ /NEED_PASSPHRASE/;
-        $self->_cpr_send( "passphrase.enter", $passwd, 0,
-            _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        unless ($passwd) {
-            $self->_read_from_status( _catch($next) );
-        }
-        else {
-            $next->skip->();
-        }
-      }, sub {
-        my $next = shift;
-        my ($cmd) = @_;
-        return $self->_abort_gnupg(
-            "Protocol error: expected MISSING_PASSPHRASE got $cmd", $cv )
-          unless $cmd eq "MISSING_PASSPHRASE";
-        $next->();
-      }, sub {
-        $cv->send;
-      };
-    $cv;
+sub _send_command {
+    shift->{command_fd}->writeln(pop);
 }
 
 sub _check_sig {
+    confess "DEPRECATED";
     my ( $self, $cmd, $arg, $cb ) = @_;
     my $cv = _condvar($cb);
 
@@ -819,33 +905,46 @@ sub gen_key_cb {
     my $proc = $self->_run_gnupg;
     $proc->finish unless $self->{input};
 
-    chain sub {
-        my $next = shift;
-        $self->_cpr_send( "keygen.algo", $algo, 0, _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        $self->_cpr_send( "keygen.size", $size, 0, _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        $self->_cpr_send( "keygen.valid", $expire, 0, _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        $self->_cpr_send( "keygen.name", $name, 0, _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        $self->_cpr_send( "keygen.email", $email, 0, _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        $self->_cpr_send( "keygen.comment", $comment, 0, _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        $self->_send_passphrase( $passphrase, _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        $self->_end_gnupg( _catch( $cv, $next ) );
-      }, sub {
-        $cv->send( {} );
-      };
+    $self->_parse_status(
+        $cv,
+        get_line => sub {
+            my ($key) = @_;
+            for ($key) {
+                _eq('keygen.algo')
+                  && $self->_send_command($algo)
+                  && last;
+                _eq('keygen.size')
+                  && $self->_send_command($size)
+                  && last;
+                _eq('keygen.valid')
+                  && $self->_send_command($expire)
+                  && last;
+                _eq('keygen.name')
+                  && $self->_send_command($name)
+                  && last;
+                _eq('keygen.email')
+                  && $self->_send_command($email)
+                  && last;
+                _eq('keygen.comment')
+                  && $self->_send_command($comment)
+                  && last;
+                $self->_abort_gnupg( "unknown key: $key", $cv );
+            }
+        },
+        need_passphrase_sym => sub {
+            unless ( defined $passphrase ) {
+                return $self->_abort_gnupg( "passphrase required", $cv );
+            }
+        },
+        get_hidden => sub {
+            $self->_send_command($passphrase);
+        },
+        key_created => sub {
+            my $fingerprint = $_[1];
+            $self->_end_gnupg( sub { $cv->send($fingerprint) } );
+        }
+    );
+
     $cv;
 }
 
@@ -900,39 +999,20 @@ sub import_keys_cb {
 
     my $num_files = ref $args{keys} ? @{ $args{keys} } : 1;
 
-    my ( $sub1, $sub2, $sub3 );
-
-    $sub1 = sub {
-        my ( $cmd, $arg ) = @_;
-        if ( $cmd =~ /IMPORTED/ ) {
-            $count++;
-            $sub2->();
+    $self->_parse_status(
+        $cv,
+        imported   => sub { $count++ },
+        import_res => sub {
+            $self->_end_gnupg(
+                _catch(
+                    $cv,
+                    sub {
+                        $cv->send( { count => $count } );
+                    }
+                )
+            );
         }
-        else {
-            $sub3->( $cmd, $arg );
-        }
-    };
-
-    $sub3 = sub {
-        my ( $cmd, $arg ) = @_;
-        return $self->_abort_gnupg(
-            "protocol error expected IMPORT_OK got $cmd", $cv )
-          unless $cmd =~ /IMPORT_OK/;
-        $self->_end_gnupg(
-            _catch(
-                $cv,
-                sub {
-                    $cv->send( { count => $count } );
-                }
-            )
-        );
-    };
-
-    $sub2 = sub {
-        $self->_read_from_status( _catch( $cv, $sub1 ) );
-    };
-
-    $sub2->();
+    );
 
     $cv;
 }
@@ -1158,75 +1238,30 @@ sub encrypt_cb {
     my $proc = $self->_run_gnupg;
     $proc->finish unless $self->{input};
 
-    chain sub {
-        my $next = shift;
-
-        # Unless we decided to sign or are using symmetric cipher, we are done
-        if ( $args{sign} or $args{symmetric} ) {
-            $self->_send_passphrase( $passphrase, _catch( $cv, $next ) );
-        }
-        else {
-            $next->skip(2)->();
-        }
-      }, sub {
-        my $next = shift;
-        if ( $args{sign} ) {
-            $self->_read_from_status( _catch( $cv, $next ) );
-        }
-        else {
-            $next->skip->();
-        }
-      }, sub {
-        my $next = shift;
-        my ( $cmd, $arg ) = @_;
-        return $self->_abort_gnupg( "invalid passphrase - $cmd", $cv )
-          unless $cmd =~ /GOOD_PASSPHRASE/;
-        $next->();
-      }, sub {
-        my $next = shift;
-
-        # It is possible that this key has no assigned trust value.
-        # Assume the caller knows what he is doing.
-        $self->_cpr_maybe_send( "untrusted_key.override", 'y',
-            _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        $self->_read_from_status( _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        my ( $cmd, $arg ) = @_;
-        unless ( $args{sign} ) {
-            return $next->skip->(@_);
-        }
-        return $self->_abort_gnupg(
-            "protocol error expected BEGIN_SIGN got $cmd", $cv )
-          unless $cmd =~ /BEGIN_SIGN/;
-        $self->_read_from_status( _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        my ( $cmd, $arg ) = @_;
-        return $self->_abort_gnupg(
-            "protocol error expected SIG_CREATED got $cmd", $cv )
-          unless $cmd =~ /SIG_CREATED/;
-        $self->_read_from_status( _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        my ( $cmd, $arg ) = @_;
-        return $self->_abort_gnupg(
-            "protocol error expected BEGIN_ENCRYPTION got $cmd", $cv )
-          unless $cmd =~ /BEGIN_ENCRYPTION/;
-        $self->_read_from_status( _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        my ( $cmd, $arg ) = @_;
-        return $self->_abort_gnupg(
-            "protocol error expected END_ENCRYPTION got $cmd", $cv )
-          unless $cmd =~ /END_ENCRYPTION/;
-        $self->_end_gnupg( _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        $cv->send( {} );
-      };
+    $self->_parse_status(
+        $cv,
+        end_encryption => sub {
+            $self->_end_gnupg(
+                sub {
+                    $cv->send;
+                }
+            );
+        },
+        need_passphrase => sub {
+            unless ( defined $passphrase ) {
+                return $self->_abort_gnupg( "passphrase required", $cv );
+            }
+        },
+        get_hidden => sub {
+            $self->_send_command($passphrase);
+        },
+        get_bool => sub {
+            for (shift) {
+                _eq('untrusted_key.override')
+                  && do { $self->_send_command('y'); last }
+            }
+        },
+    );
 
     $cv;
 }
@@ -1313,24 +1348,20 @@ sub sign_cb {
     my $proc = $self->_run_gnupg;
     $proc->finish unless $self->{input};
 
-    chain sub {
-        my $next = shift;
-
-        # We need to unlock the private key
-        $self->_send_passphrase( $passphrase, _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        $self->_read_from_status( _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        my ( $cmd, $line ) = @_;
-        return $self->_abort_gnupg( "invalid passphrase", $cv )
-          unless $cmd =~ /GOOD_PASSPHRASE/;
-        $self->_end_gnupg( _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        $cv->send( {} );
-      };
+    $self->_parse_status(
+        $cv,
+        need_passphrase => sub {
+            unless ( defined $passphrase ) {
+                return $self->_abort_gnupg( "passphrase required", $cv );
+            }
+        },
+        get_hidden => sub {
+            $self->_send_command($passphrase);
+        },
+        sig_created => sub {
+            $self->_end_gnupg( sub { $cv->send } );
+        },
+    );
 
     $cv;
 }
@@ -1467,16 +1498,12 @@ sub verify_cb {
 
     my $sig = {};
 
-    chain sub {
-        my $next = shift;
-        $self->_check_sig( undef, undef, _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        ($sig) = @_;
-        $self->_end_gnupg( _catch( $cv, $next ) );
-      }, sub {
-        $cv->send($sig);
-      };
+    $self->_parse_status(
+        $cv,
+        validsig => sub {
+            $self->_end_gnupg( sub { $cv->send } );
+        }
+    );
 
     $cv;
 }
@@ -1542,101 +1569,20 @@ sub decrypt_cb {
 
     my $sig = {};
 
-    if ( $args{symmetric} ) {
-
-        chain sub {
-            my $next = shift;
-            $self->_send_passphrase( $passphrase, _catch( $cv, $next ) );
-          }, sub {
-            my $next = shift;
-            $self->_read_from_status( _catch( $cv, $next ) );
-          }, sub {
-            my $next = shift;
-            my ( $cmd, $arg ) = @_;
-            return $self->_abort_gnupg( "invalid passphrase", $cv )
-              if $cmd =~ /BAD_PASSPHRASE/;
-            $self->_read_from_status( _catch( $cv, $next ) );
-          }, sub {
-            my $next = shift;
-            my ( $cmd, $arg ) = @_;
-            if ( $cmd =~ /BEGIN_DECRYPTION/ ) {
-                $self->_read_from_status( _catch( $cv, $next ) );
+    $self->_parse_status(
+        $cv,
+        need_passphrase => sub {
+            unless ( defined $passphrase ) {
+                return $self->_abort_gnupg( "passphrase required", $cv );
             }
-            else {
-                $next->(@_);
-            }
-          }, sub {
-            my $next = shift;
-            my ( $cmd, $arg ) = @_;
-            if ( $cmd =~ /DECRYPTION_INFO/ ) {
-                $self->_read_from_status( _catch( $cv, $next ) );
-            }
-            else {
-                $next->(@_);
-            }
-          }, sub {
-            my $next = shift;
-            my ( $cmd, $arg ) = @_;
-            return $self->_abort_gnupg(
-                "protocol error expected PLAINTEXT got $cmd", $cv )
-              unless $cmd =~ /PLAINTEXT/;
-            $self->_end_gnupg( _catch( $cv, $next ) );
-          }, sub {
-            $cv->send($sig);
-          };
-
-    }
-    else {
-
-        chain sub {
-            my $next = shift;
-            $self->_read_from_status( _catch( $cv, $next ) );
-          }, sub {
-            my $next = shift;
-            $self->_send_passphrase( $passphrase, _catch( $cv, $next ) );
-          }, sub {
-            my $next = shift;
-            $self->_read_from_status( _catch( $cv, $next ) );
-          }, sub {
-            my $next = shift;
-            my ( $cmd, $arg ) = @_;
-            return $self->_abort_gnupg( "invalid passphrase", $cv )
-              unless $cmd =~ /GOOD_PASSPHRASE/;
-            $self->_read_from_status( _catch( $cv, $next ) );
-          }, sub {
-            my $next = shift;
-            my ( $cmd, $arg ) = @_;
-            if ( $cmd =~ /BEGIN_DECRYPTION/ ) {
-                $self->_read_from_status( _catch( $cv, $next ) );
-            }
-            else {
-                $next->(@_);
-            }
-          }, sub {
-            my $next = shift;
-            my ( $cmd, $arg ) = @_;
-            if ( $cmd =~ /SIG_ID/ ) {
-                $self->_check_sig( $cmd, $arg, $next );
-            }
-            else {
-                $next->skip->(@_);
-            }
-          }, sub {
-            my $next = shift;
-            ($sig) = @_;
-            $self->_read_from_status( _catch( $cv, $next ) );
-          }, sub {
-            my $next = shift;
-            my ( $cmd, $arg ) = @_;
-            return $self->_abort_gnupg(
-                "protocol error expected DECRYPTION_INFO got $cmd", $cv )
-              unless $cmd =~ /DECRYPTION_INFO/;
-            $self->_end_gnupg( _catch( $cv, $next ) );
-          }, sub {
-            $cv->send($sig);
-          };
-
-    }
+        },
+        get_hidden => sub {
+            $self->_send_command($passphrase);
+        },
+        end_decryption => sub {
+            $self->_end_gnupg( sub { $cv->send } );
+        },
+    );
 
     $cv;
 }
