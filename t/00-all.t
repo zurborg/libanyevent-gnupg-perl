@@ -95,7 +95,7 @@ sub multiple_recipients {
 }
 
 sub gen_key_test {
-    if ( $ENV{AUTOMATED_TESTING} and !$ENV{AUTHOR_TESTING} ) {
+    if ( $ENV{AUTOMATED_TESTING} ) {
         return;
     }
     diag "Generating a key - can take some time";
