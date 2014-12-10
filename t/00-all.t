@@ -99,7 +99,7 @@ sub gen_key_test {
     $gpg->gen_key(
         passphrase => PASSWD,
         name       => USERID,
-        progress => sub {
+        progress   => sub {
             local $, = ', ';
             diag "progress @_" if $ENV{AUTOMATED_TESTING};
         }

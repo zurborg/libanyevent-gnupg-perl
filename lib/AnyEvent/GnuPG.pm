@@ -500,7 +500,7 @@ sub _end_gnupg {
 }
 
 sub _run_gnupg {
-    my $self = shift;
+    my ( $self, $cv ) = @_;
 
     if ( defined $self->{input} and not ref $self->{input} ) {
         my $file = $self->{input};
@@ -530,11 +530,12 @@ sub _run_gnupg {
 
     AE::log debug => "running $gpg " . join( ' ' => @$cmdline );
     my $proc = AnyEvent::Proc->new(
-        bin    => $gpg,
-        args   => $cmdline,
-        extras => [ $status, $command ],
-        ttl    => 300,
-        errstr => \$err,
+        bin           => $gpg,
+        args          => $cmdline,
+        extras        => [ $status, $command ],
+        ttl           => 600,
+        on_ttl_exceed => sub { $self->_abort_gnupg( 'ttl exceeded', $cv ) },
+        errstr        => \$err,
     );
 
     if ( defined $self->{input} ) {
@@ -780,7 +781,7 @@ sub version_cb {
 
     my $version;
 
-    my $proc = $self->_run_gnupg;
+    my $proc = $self->_run_gnupg($cv);
 
     $proc->pipe( \$version );
 
@@ -902,7 +903,7 @@ sub gen_key_cb {
     $self->_options( [] );
     $self->_args(    [] );
 
-    my $proc = $self->_run_gnupg;
+    my $proc = $self->_run_gnupg($cv);
     $proc->finish unless $self->{input};
 
     $self->_parse_status(
@@ -995,7 +996,7 @@ sub import_keys_cb {
         $self->_args( [] );
     }
 
-    my $proc = $self->_run_gnupg;
+    my $proc = $self->_run_gnupg($cv);
     $proc->finish unless $self->{input};
 
     my $num_files = ref $args{keys} ? @{ $args{keys} } : 1;
@@ -1117,7 +1118,7 @@ sub export_keys_cb {
     $self->_options($options);
     $self->_args($keys);
 
-    my $proc = $self->_run_gnupg;
+    my $proc = $self->_run_gnupg($cv);
 
     $proc->finish unless $self->{input};
 
@@ -1236,7 +1237,7 @@ sub encrypt_cb {
     $self->_options($options);
     $self->_args( [] );
 
-    my $proc = $self->_run_gnupg;
+    my $proc = $self->_run_gnupg($cv);
     $proc->finish unless $self->{input};
 
     $self->_parse_status(
@@ -1346,7 +1347,7 @@ sub sign_cb {
     $self->_options($options);
     $self->_args( [] );
 
-    my $proc = $self->_run_gnupg;
+    my $proc = $self->_run_gnupg($cv);
     $proc->finish unless $self->{input};
 
     $self->_parse_status(
@@ -1494,7 +1495,7 @@ sub verify_cb {
     $self->_options($options);
     $self->_args($files);
 
-    my $proc = $self->_run_gnupg;
+    my $proc = $self->_run_gnupg($cv);
     $proc->finish unless $self->{input};
 
     my $sig = {};
@@ -1563,7 +1564,7 @@ sub decrypt_cb {
     $self->_options( [] );
     $self->_args(    [] );
 
-    my $proc = $self->_run_gnupg;
+    my $proc = $self->_run_gnupg($cv);
     $proc->finish unless $self->{input};
 
     my $passphrase = $args{passphrase} || "";
