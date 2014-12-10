@@ -125,18 +125,6 @@ our %EXPORT_TAGS = (
 
 Exporter::export_ok_tags(qw( algo trust ));
 
-sub _parse_trust {
-    for (shift) {
-        if (defined) {
-            /ULTIMATE/ && do { return TRUST_ULTIMATE; };
-            /FULLY/    && do { return TRUST_FULLY; };
-            /MARGINAL/ && do { return TRUST_MARGINAL; };
-            /NEVER/    && do { return TRUST_NEVER; };
-        }
-        return TRUST_UNDEFINED;    # Default
-    }
-}
-
 sub _options {
     my $self = shift;
     $self->{cmd_options} = shift if ( $_[0] );
@@ -557,136 +545,6 @@ sub _run_gnupg {
 
 sub _send_command {
     shift->{command_fd}->writeln(pop);
-}
-
-sub _check_sig {
-    confess "DEPRECATED";
-    my ( $self, $cmd, $arg, $cb ) = @_;
-    my $cv = _condvar($cb);
-
-    my ( $sigid, $date, $time, $keyid, $name, $policy_url, $fingerprint,
-        $trust );
-
-    chain sub {
-        my $next = shift;
-
-        # Our caller may already have grabbed the first line of
-        # signature reporting.
-        if ($cmd) {
-            $next->( $cmd, $arg );
-        }
-        else {
-            $self->_read_from_status( _catch( $cv, $next ) );
-        }
-      }, sub {
-        my $next = shift;
-        ( $cmd, $arg ) = @_;
-
-        # Ignore patent warnings.
-        if ( $cmd =~ /RSA_OR_IDEA/ ) {
-            $self->_read_from_status( _catch( $cv, $next ) );
-        }
-        else {
-            $next->(@_);
-        }
-      }, sub {
-        my $next = shift;
-        ( $cmd, $arg ) = @_;
-
-        # Ignore automatic key imports
-        if ( $cmd =~ /IMPORTED/ ) {
-            $self->_read_from_status( _catch( $cv, $next ) );
-        }
-        else {
-            $next->(@_);
-        }
-      }, sub {
-        my $next = shift;
-        ( $cmd, $arg ) = @_;
-        if ( $cmd =~ /IMPORT_OK/ ) {
-            $self->_read_from_status( _catch( $cv, $next ) );
-        }
-        else {
-            $next->(@_);
-        }
-      }, sub {
-        my $next = shift;
-        ( $cmd, $arg ) = @_;
-        if ( $cmd =~ /IMPORT_RES/ ) {
-            $self->_read_from_status( _catch( $cv, $next ) );
-        }
-        else {
-            $next->(@_);
-        }
-      }, sub {
-        my $next = shift;
-        ( $cmd, $arg ) = @_;
-        if ( $cmd =~ /BADSIG/ ) {
-            return $self->_abort_gnupg( "invalid signature from $arg", $cv );
-        }
-        if ( $cmd =~ /ERRSIG/ ) {
-            my ( $keyid, $key_algo, $digest_algo, $sig_class, $timestamp, $rc )
-              = split ' ', $arg;
-            if ( $rc == 9 ) {
-                return $self->_abort_gnupg( "no public key $keyid", $cv );
-            }
-            else {
-                return $self->_abort_gnupg(
-                    "error verifying signature from $keyid", $cv );
-            }
-        }
-        return $self->_abort_gnupg( "protocol error: expected SIG_ID", $cv )
-          unless $cmd =~ /SIG_ID/;
-        ( $sigid, $date, $time ) = split /\s+/, $arg;
-        $self->_read_from_status( _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        ( $cmd, $arg ) = @_;
-        return $self->_abort_gnupg( "protocol error: expected GOODSIG", $cv )
-          unless $cmd =~ /GOODSIG/;
-        ( $keyid, $name ) = split /\s+/, $arg, 2;
-
-        $self->_read_from_status( _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        ( $cmd, $arg ) = @_;
-        if ( $cmd =~ /POLICY_URL/ ) {
-            $policy_url = $arg;
-            $self->_read_from_status( _catch( $cv, $next ) );
-        }
-        else {
-            $next->(@_);
-        }
-      }, sub {
-        my $next = shift;
-        ( $cmd, $arg ) = @_;
-
-        return $self->_abort_gnupg( "protocol error: expected VALIDSIG", $cv )
-          unless $cmd =~ /VALIDSIG/;
-        ($fingerprint) = split /\s+/, $arg, 2;
-
-        $self->_read_from_status( _catch( $cv, $next ) );
-      }, sub {
-        my $next = shift;
-        ( $cmd, $arg ) = @_;
-        return $self->_abort_gnupg( "protocol error: expected TRUST*", $cv )
-          unless $cmd =~ /TRUST/;
-        ($trust) = _parse_trust($cmd);
-
-        $cv->send(
-            {
-                sigid       => $sigid,
-                date        => $date,
-                timestamp   => $time,
-                keyid       => $keyid,
-                user        => $name,
-                fingerprint => $fingerprint,
-                trust       => $trust,
-                policy_url  => $policy_url,
-            }
-        );
-      };
-    $cv;
 }
 
 sub DESTROY {
@@ -1498,13 +1356,35 @@ sub verify_cb {
     my $proc = $self->_run_gnupg($cv);
     $proc->finish unless $self->{input};
 
-    my $sig = {};
+    my $sig = { trust => TRUST_UNDEFINED, };
 
     $self->_parse_status(
         $cv,
+        sig_id => sub {
+            ( $sig->{sigid}, $sig->{data}, $sig->{timestamp} ) = @_;
+        },
+        goodsig => sub {
+            ( $sig->{keyid}, $sig->{user} ) = @_;
+        },
         validsig => sub {
+            ( $sig->{fingerprint} ) = @_;
             $self->_end_gnupg( sub { $cv->send } );
-        }
+        },
+        policy_url => sub {
+            ( $sig->{policy_url} ) = @_;
+        },
+        trust_never => sub {
+            $sig->{trust} = TRUST_NEVER;
+        },
+        trust_marginal => sub {
+            $sig->{trust} = TRUST_MARGINAL;
+        },
+        trust_fully => sub {
+            $sig->{trust} = TRUST_FULLY;
+        },
+        trust_ultimate => sub {
+            $sig->{trust} = TRUST_ULTIMATE;
+        },
     );
 
     $cv;
@@ -1569,7 +1449,7 @@ sub decrypt_cb {
 
     my $passphrase = $args{passphrase} || "";
 
-    my $sig = {};
+    my $sig = { trust => TRUST_UNDEFINED, };
 
     $self->_parse_status(
         $cv,
@@ -1583,6 +1463,30 @@ sub decrypt_cb {
         },
         end_decryption => sub {
             $self->_end_gnupg( sub { $cv->send } );
+        },
+        sig_id => sub {
+            ( $sig->{sigid}, $sig->{data}, $sig->{timestamp} ) = @_;
+        },
+        goodsig => sub {
+            ( $sig->{keyid}, $sig->{user} ) = @_;
+        },
+        validsig => sub {
+            ( $sig->{fingerprint} ) = @_;
+        },
+        policy_url => sub {
+            ( $sig->{policy_url} ) = @_;
+        },
+        trust_never => sub {
+            $sig->{trust} = TRUST_NEVER;
+        },
+        trust_marginal => sub {
+            $sig->{trust} = TRUST_MARGINAL;
+        },
+        trust_fully => sub {
+            $sig->{trust} = TRUST_FULLY;
+        },
+        trust_ultimate => sub {
+            $sig->{trust} = TRUST_ULTIMATE;
         },
     );
 
