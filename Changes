@@ -1,6 +1,13 @@
 Revision history for GnuPG
 
 {{$NEXT}}
+ - improve test
+ - satisfy perlcritic
+ - more documentation
+ - add method for getting gpg version
+ - abort when ttl exceeded
+ - increase ttl to 10min
+ - tidy up code
 
 1.000 2014-12-06
  - merge ChangeLog with NEWS to Changes
